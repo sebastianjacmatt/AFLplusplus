@@ -76,11 +76,6 @@ def fuzz_send(buf):
 def queue_new_entry(filename_new_queue, filename_orig_queue):
     return False
 
-def introspection():
-    return string
-
-def deinit():  # optional for Python
-    pass
 
 def init(seed: int) -> None:
     """
