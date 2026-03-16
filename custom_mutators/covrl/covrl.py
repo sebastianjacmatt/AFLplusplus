@@ -11,6 +11,14 @@ re tokenizing the same seed on every fuzz() call. Each fuzz() invocation then
 applies a fresh mask based mutation to the cached token sequence and performs
 token level infilling before re encoding the result to bytes for execution.
 
+TODO: token MASK & token infilling
+TODO: copy hex_to_dec(bytes(buf))/dec_to_hex(ids) from covrl.utils instead of decode_or_tokenize_once()
+TODO: define config
+TODO: rewarding in finetuning and dataset finetuning dataset creation
+TODO: describe ambiguety in post_process()
+TODO: splicing
+TODO: description of bytes->tokens-encode->masking->tokens-decode->bytes
+
 @author:     Sebastian Jacobsen Matthews
 @contact:    sebastianjacmatt@gmail.com
 
@@ -39,7 +47,7 @@ def init(seed):
     global SAVE_DIR
 
     global FUZZ_COUNTER_LIMIT
-    global mutations_since_last_finetune
+    global fuzz_counter
     global pending_new_queue_files
     global finetune_cycle_index
 
@@ -66,9 +74,9 @@ def init(seed):
     FINETUNER = ACTOR.finetuner
 
     FUZZ_COUNTER_LIMIT = CONFIG.finetune_interval
-    mutations_since_last_finetune = 0
+    fuzz_counter = 0
     pending_new_queue_files = []
-    finetune_cycle_index = 0
+    finetune_index = 0
 
     current_seed_token_ids = None
     current_seed_metadata = None
@@ -154,7 +162,7 @@ def fuzz(buf, add_buf, max_size):
         # TODO: only tokenize add_buf when splice mode is actually selected
         splice_token_ids = decode_or_tokenize_once(add_buf)
 
-    masked_token_ids = _apply_fresh_random_mask(
+    masked_token_ids = _random_mask(
         token_ids=base_token_ids,
         splice_source=splice_token_ids,
         # TODO: define exact mutation modes and probabilities
@@ -170,6 +178,18 @@ def fuzz(buf, add_buf, max_size):
 
     return out_buf
 
+# def post_process(buf):
+#     '''
+#     Called just before the execution to write the test case in the format
+#     expected by the target
+#
+#     @type buf: bytearray
+#     @param buf: The buffer containing the test case to be executed
+#
+#     @rtype: bytearray
+#     @return: The buffer containing the test case after
+#     '''
+#     return buf
 
 def queue_new_entry(filename_new_queue, filename_orig_queue):
     """
@@ -195,28 +215,28 @@ def queue_new_entry(filename_new_queue, filename_orig_queue):
 
 def _maybe_finetune():
     """
-    Trigger cycle based finetuning when enough fuzz_counter attempts have elapsed.
+    Trigger fuzz_counter based finetuning when enough FUZZ_COUNTER_LIMIT attempts have elapsed.
 
     This preserves the staged CovRL design:
     mutation and execution happen online during fuzzing,
     reward computation and finetuning happen later in batch over the corpus.
     """
     global fuzz_counter
-    global finetune_cycle_index
+    global finetune_index
 
     fuzz_counter += 1
 
-    if fuzz_counter < fuzz_counter_limit:
+    if fuzz_counter < FUZZ_COUNTER_LIMIT:
         return
 
     corpus_dir = SAVE_DIR # define a proper way to store SAVE_DIR
-    _finetune_cycle(corpus_dir)
+    _finetune(corpus_dir)
 
     fuzz_counter = 0
-    finetune_cycle_index += 1
+    finetune_index += 1
 
 
-def _finetune_cycle(corpus_dir):
+def _finetune(corpus_dir):
     """
     Run one staged finetuning cycle over saved corpus files.
     """
@@ -234,7 +254,8 @@ def _finetune_cycle(corpus_dir):
     #     "file_id": str,
     #     "data": decoded_js_source,
     # }
-
+    
+    # TODO: fix proper rewarding
     mutation_dataset = Rewarding.update(dataset, is_update_idf=True)
 
     # Rewarding.update conceptually does:
@@ -259,7 +280,7 @@ def _finetune_cycle(corpus_dir):
     #
     # return dataset with rewards
 
-    # TODO: define how additional sampled training data is mixed in
+    # TODO: define how additional sampled training data is mixed in, 4:1 maybe from CovRL-Fuzz baseline
     sampled_train_data = sample_train_data()
 
     critic_dataset = make_critic_dataset(
@@ -270,7 +291,7 @@ def _finetune_cycle(corpus_dir):
     # TODO: define training interface exactly
     train_critic(critic_dataset)
 
-    if finetune_cycle_index > 0:
+    if finetune_index > 0:
         actor_dataset = make_actor_dataset(
             mutation_dataset=mutation_dataset,
             sampled_train_data=sampled_train_data,
@@ -314,7 +335,7 @@ def reload_actor():
     FINETUNER = ACTOR.finetuner
 
 
-def _apply_fresh_random_mask(token_ids, splice_source=None):
+def _random_mask(token_ids, splice_source=None):
     """
     Create a fresh masked mutation candidate from the cached current seed.
 
@@ -354,56 +375,45 @@ def encode(token_ids):
     # TODO: encode JS source to bytes
     return out_buf
 
-
 def load_saved_queue_files(corpus_dir):
     # TODO
     return dataset
-
 
 def load_config():
     # TODO
     return config
 
-
 def sample_train_data():
     # TODO
     return sampled_train_data
-
 
 def make_critic_dataset(mutation_dataset, sampled_train_data):
     # TODO
     return critic_dataset
 
-
 def make_actor_dataset(mutation_dataset, sampled_train_data):
     # TODO
     return actor_dataset
-
 
 def train_critic(critic_dataset):
     # TODO
     pass
 
-
 def finetune_actor_with_ppo_like_loss(actor_dataset, critic, previous_actor):
     # TODO
     pass
-
 
 def get_current_critic():
     # TODO
     return critic
 
-
 def get_previous_actor():
     # TODO
     return previous_actor
 
-
 def get_latest_actor_checkpoint():
     # TODO
     return actor_path
-
 
 def get_latest_critic_checkpoint():
     # TODO
