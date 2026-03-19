@@ -52,6 +52,7 @@ import random
 
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from covrl_trainer import PPOTrainer
 
 # ---------------------------------------------------------------------------
 # CovRL constants — taken from CovRL AFL 2.52b config.h / afl-fuzz.c.
@@ -442,7 +443,6 @@ def _encode(token_ids):
     js_text = TOKENIZER.decode(token_ids, skip_special_tokens=True)
     return js_text.encode("utf-8")
 
-
 # ---------------------------------------------------------------------------
 # Finetune cycle
 # ---------------------------------------------------------------------------
@@ -501,7 +501,7 @@ def _reload_actor():
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 stubs — will be replaced with concrete CovRL implementations
+# Helper methods 
 # ---------------------------------------------------------------------------
 
 def load_config():
@@ -518,43 +518,3 @@ def load_saved_queue_files(corpus_dir):
 def sample_train_data():
     # TODO (Stage 2): sample at 4× mutation_dataset size from CONFIG.train_dataset_path
     return sampled_train_data
-
-
-def make_critic_dataset(mutation_dataset, sampled_train_data):
-    # TODO (Stage 2): CriticDataset — tokenize JS, assign label via score_to_label()
-    return critic_dataset
-
-
-def make_actor_dataset(mutation_dataset, sampled_train_data):
-    # TODO (Stage 2): ActorDataset — T5 span-masking with Poisson noise (lambda=3.0)
-    return actor_dataset
-
-
-def train_critic(critic_dataset):
-    # TODO (Stage 2): T5EncoderModel + dropout + linear head (8-class cross-entropy)
-    pass
-
-
-def finetune_actor_with_ppo_like_loss(actor_dataset, critic, previous_actor):
-    # TODO (Stage 2): PPO-like update — ratio clamp [0.8, 1.2], ppo_loss + CE loss
-    pass
-
-
-def get_current_critic():
-    # TODO (Stage 2)
-    return critic
-
-
-def get_previous_actor():
-    # TODO (Stage 2)
-    return previous_actor
-
-
-def get_latest_actor_checkpoint():
-    # TODO (Stage 2): read path from FineTuner save_dir
-    return actor_path
-
-
-def get_latest_critic_checkpoint():
-    # TODO (Stage 2): read path from FineTuner save_dir
-    return critic_path
