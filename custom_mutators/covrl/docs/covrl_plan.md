@@ -263,6 +263,11 @@ _fuzz_one_counter: int               # counts queue_get() calls
 _finetune_pending: bool
 ```
 
+Ok, so in implementing our stage 1 of the covrl plan we forgo these things
+- *splicing* -> less mutation diversity, we don't need it for a working baseline
+- *adaptive energy scheduling* -> slower exec/sec, we cannot implement it
+- *little-endian u16 seed token store* -> slower exec/sec, we use the native bytearray representation
+
 ---
 
 ## Stage 2 — CovRL ML integration
