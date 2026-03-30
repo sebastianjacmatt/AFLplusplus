@@ -94,7 +94,6 @@ UNKNOWN_TOKEN = None   # TOKENIZER.unk_token_id (set in init after tokenizer loa
 # Updated in queue_get() / fuzz_count()
 _current_seed_token_ids  = None   # token ids from the most recent fuzz_count()
 # TODO: _call_index              = 0      # fuzz() call index within the current seed's window
-_fuzz_one_counter        = 0      # cumulative queue_get() calls (finetune trigger) TODO: only increment on queue_new_get() i think, check CovRL-Fuzz(afl2.52b)
 _finetune_pending        = False  # set by queue_get(), consumed by fuzz_count()
 
 # Finetune bookkeeping
@@ -117,7 +116,7 @@ def init(seed):
 
     global CONFIG, ACTOR, TOKENIZER, UNKNOWN_TOKEN
     global _current_seed_token_ids
-    global _fuzz_one_counter, _finetune_pending
+    global _finetune_pending
     global _pending_new_queue_files, _finetune_cycle_index
 
     TOKENIZER     = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -133,7 +132,6 @@ def init(seed):
     # TODO load CONFIG, construct Trainer, set SAVE_DIR
 
     _current_seed_token_ids  = None
-    _fuzz_one_counter        = 0
     _finetune_pending        = False
     _pending_new_queue_files = []
     _finetune_cycle_index    = 0
@@ -160,11 +158,10 @@ def queue_get(filename):
     @rtype: bool
     @return: Always True
     """
-    global _fuzz_one_counter, _finetune_pending
+    global _finetune_pending
 
-    _fuzz_one_counter += 1 #TODO: fuzz_counter increment on queue_new_entry maybe? view `skipped_fuzz` logic of covrl (modified afl2.52b)
-
-    if _fuzz_one_counter % FINETUNE_INTERVAL == 0:
+    # finetun    
+    if len(_pending_new_queue_files) % FINETUNE_INTERVAL == 0:
         _finetune_pending = True
 
     return True
@@ -173,13 +170,14 @@ def queue_get(filename):
 def fuzz_count(buf):
     """
     Called when AFL++ selects a seed. Returns FUZZ_COUNT: the number of times
-    fuzz() will be invoked for this seed.
+    fuzz() will be invoked for this seed. 
+    TODO: FUZZ_COUNT should be dependent on adaptive seed scheduling
 
     Triggers any pending finetune cycle before tokenizing (mirrors original
     placement: sync_fuzzers() runs after fuzz_one() completes and before the
     next seed is processed).
 
-    Tokenizes buf once and the result; fuzz() must not re-tokenize.
+    Tokenizes buf once and the result; fuzz() won't re-tokenize.
 
     @type buf: bytearray
     @param buf: Raw seed bytes from AFL++
