@@ -80,6 +80,10 @@ MASK_PROBABILITY   = 0.15   # fraction of tokens masked; sets max_length ceiling
 N_SAMPLES          = 32     # top_k for contrastive search
 PENALTY_ALPHA      = 0.6    # degeneration penalty for contrastive search
 
+# Directory where actor/critic checkpoints are written after each finetune cycle.
+# Override via environment variable or AFL_PYTHON_MODULE_XTRA (TODO: Stage 2).
+SAVE_DIR = "./covrl_checkpoints"
+
 
 # ---------------------------------------------------------------------------
 # Module-level state — all initialised in init()
@@ -90,6 +94,7 @@ CONFIG        = None   # loaded config object  TODO:
 ACTOR         = None   # AutoModelForSeq2SeqLM (loaded in init)
 TOKENIZER     = None   # AutoTokenizer         (loaded in init)
 UNKNOWN_TOKEN = None   # TOKENIZER.unk_token_id (set in init after tokenizer loads)
+TRAINER       = None   # PPOTrainer (created in init, owns _finetune_cycle_index)
 
 # Updated in queue_get() / fuzz_count()
 _current_seed_token_ids  = None   # token ids from the most recent fuzz_count()
@@ -98,7 +103,7 @@ _finetune_pending        = False  # set by queue_get(), consumed by fuzz_count()
 
 # Finetune bookkeeping
 _pending_new_queue_files = []     # accumulated by queue_new_entry()
-_finetune_cycle_index    = 0      # critic-only on cycle 0; actor+critic from cycle 1
+# NOTE: _finetune_cycle_index is owned by TRAINER, not tracked here.
 
 
 # ---------------------------------------------------------------------------
@@ -114,10 +119,10 @@ def init(seed):
     """
     # TODO: remove/make reason about reproducability random.seed(seed)
 
-    global CONFIG, ACTOR, TOKENIZER, UNKNOWN_TOKEN
+    global CONFIG, ACTOR, TOKENIZER, UNKNOWN_TOKEN, TRAINER
     global _current_seed_token_ids
     global _finetune_pending
-    global _pending_new_queue_files, _finetune_cycle_index
+    global _pending_new_queue_files
 
     TOKENIZER     = AutoTokenizer.from_pretrained(MODEL_NAME)
     ACTOR         = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME).to(DEVICE)
@@ -129,12 +134,17 @@ def init(seed):
         f"MASK_TOKEN={MASK_TOKEN}; update the MASK_TOKEN constant to match"
     )
 
-    # TODO load CONFIG, construct Trainer, set SAVE_DIR
+    # TODO: load CONFIG; derive SAVE_DIR from env / AFL_PYTHON_MODULE_XTRA
+    TRAINER = PPOTrainer(
+        actor=ACTOR,
+        tokenizer=TOKENIZER,
+        device=DEVICE,
+        save_dir=SAVE_DIR,
+    )
 
     _current_seed_token_ids  = None
     _finetune_pending        = False
     _pending_new_queue_files = []
-    _finetune_cycle_index    = 0
 
 
 def deinit():
@@ -447,72 +457,37 @@ def _encode(token_ids):
 
 def _finetune(corpus_dir):
     """
-    Run one staged CovRL finetuning cycle over saved corpus files.
+    Delegate one staged CovRL finetuning cycle to TRAINER, then hot-swap ACTOR.
 
-    Cycle 0: critic only (critic needs one training pass before its scores
-             are used as PPO rewards — see covrl_plan.md § Stage 2 invariant 3).
-    Cycle N>0: critic update then actor PPO-like update.
+    All data loading, reward computation, and dataset construction are the
+    trainer's responsibility.  covrl.py passes only corpus_dir.
+
+    @type  corpus_dir: str or None
+    @param corpus_dir: Path to the AFL++ output queue directory.
+                       None until Stage 2 corpus loading is implemented.
     """
-    global ACTOR, TOKENIZER, _finetune_cycle_index, _pending_new_queue_files
+    global _pending_new_queue_files
 
-    # TODO (Stage 2): full pipeline:
-    #
-    # dataset = load_saved_queue_files(corpus_dir)
-    #   Each entry: {"is_orig": bool, "file_id": str, "data": decoded_js_source}
-    #
-    # mutation_dataset = Rewarding.update(dataset, is_update_idf=True)
-    #   fit():       run afl-showmap per testcase, classify validity
-    #                syntax error   -> reward = -1.0
-    #                semantic error -> reward = -0.5
-    #                valid          -> reward deferred to TF-IDF step
-    #   update_idf(): EMA update of IDF vector (alpha=0.6)
-    #   get_reward(): reward = sigmoid(log(dot(bitmap, idf))) for valid cases
-    #
-    # sampled_train_data = sample_train_data()   # 4:1 train:mutation ratio
-    #
-    # critic_dataset = make_critic_dataset(mutation_dataset, sampled_train_data)
-    # train_critic(critic_dataset)
-    #
-    # if _finetune_cycle_index > 0:
-    #     actor_dataset = make_actor_dataset(mutation_dataset, sampled_train_data)
-    #     finetune_actor_with_ppo_like_loss(
-    #         actor_dataset=actor_dataset,
-    #         critic=get_current_critic(),
-    #         previous_actor=get_previous_actor(),
-    #     )
-    #
-    # _reload_actor()
+    TRAINER.finetune(corpus_dir)
+    _reload_actor()
 
     _pending_new_queue_files = []
-    _finetune_cycle_index += 1
 
 
 def _reload_actor():
     """
-    Hot-reload the actor from the latest checkpoint after a finetuning cycle.
+    Hot-swap ACTOR with the model returned by TRAINER after a finetune cycle.
     """
     global ACTOR
 
-    # TODO (Stage 2): read checkpoint path written by Trainer, load with
-    # AutoModelForSeq2SeqLM.from_pretrained(get_latest_actor_checkpoint()).to(DEVICE)
-    pass
+    ACTOR = TRAINER.get_actor()
+    ACTOR.eval()
 
 
 # ---------------------------------------------------------------------------
-# Helper methods 
+# Helper methods
 # ---------------------------------------------------------------------------
 
 def load_config():
     # TODO (Stage 2): load from env var path or AFL_PYTHON_MODULE_XTRA argument
     return config
-
-
-def load_saved_queue_files(corpus_dir):
-    # TODO (Stage 2): parse AFL queue filenames (id:NNNNNN,... convention),
-    # read binary, decode via hex_to_dec, detokenize to JS source
-    return dataset 
-
-
-def sample_train_data():
-    # TODO (Stage 2): sample at 4× mutation_dataset size from CONFIG.train_dataset_path
-    return sampled_train_data
