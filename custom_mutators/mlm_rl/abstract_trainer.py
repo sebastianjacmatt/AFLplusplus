@@ -6,7 +6,7 @@ class Trainer(ABC):
     Abstract base for CovRL trainers.
 
     Defines the minimal interface required by the AFL++ custom mutator in
-    covrl.py.  Concrete trainers (PPO, GRPO, …) are responsible for all
+    mlm_rl.py.  Concrete trainers (PPO, GRPO, …) are responsible for all
     data loading, reward computation, and training logic internally.
     """
 
@@ -15,7 +15,7 @@ class Trainer(ABC):
         """
         Run one full training cycle over the AFL++ queue at corpus_dir.
 
-        covrl.py passes only the queue directory — data loading, reward
+        mlm_rl.py passes only the queue directory — data loading, reward
         computation, dataset construction, and the training loop are the
         trainer's responsibility.
 
@@ -29,7 +29,7 @@ class Trainer(ABC):
         """
         Return the current actor model after a finetune cycle.
 
-        Called by covrl.py _reload_actor() to hot-swap the global ACTOR.
+        Called by mlm_rl.py _reload_actor() to hot-swap the global ACTOR.
         The returned model must already be on the correct device.
         """
         pass

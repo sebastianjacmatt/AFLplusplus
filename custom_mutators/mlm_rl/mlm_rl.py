@@ -24,7 +24,7 @@ Usage::
     # 2. Install Python dependencies
     pip install torch transformers
 
-    # 3. Run — PYTHONPATH must point to the directory containing covrl.py,
+    # 3. Run — PYTHONPATH must point to the directory containing mlm_rl.py,
     #    AFL_PYTHON_MODULE is the module name without .py,
     #    AFL_CUSTOM_MUTATOR_ONLY=1 suppresses all AFL++ byte-level mutations
     #    so only the token-level CovRL mutations run.
@@ -460,7 +460,7 @@ def _finetune(corpus_dir):
     Delegate one staged CovRL finetuning cycle to TRAINER, then hot-swap ACTOR.
 
     All data loading, reward computation, and dataset construction are the
-    trainer's responsibility.  covrl.py passes only corpus_dir.
+    trainer's responsibility.  mlm.py passes only corpus_dir.
 
     @type  corpus_dir: str or None
     @param corpus_dir: Path to the AFL++ output queue directory.
