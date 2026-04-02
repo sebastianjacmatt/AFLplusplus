@@ -23,9 +23,12 @@ _prepare_data.  The dataset builders are pure structural wrappers over
 already-prepared DataFrames.
 """
 import copy
+import logging
 import os
 
 import pandas as pd
+
+log = logging.getLogger(__name__)
 from transformers import TrainingArguments
 from transformers import Trainer as HFTrainer
 
@@ -114,24 +117,30 @@ class PPOTrainer(Trainer):
         that queue loading, reward computation, and corpus mixing are never
         duplicated between the two training paths.
         """
+        log.info("[finetune] cycle %d — preparing data", self._finetune_cycle_index)
         prepared_critic_df, prepared_actor_df = self._prepare_data()
 
         if prepared_critic_df.empty:
             raise Exception("afl queue contains no mutation entries before finetuning")
 
+        log.info("[finetune] training critic on %d rows", len(prepared_critic_df))
         critic_dataset = self._make_critic_dataset(prepared_critic_df)
         self._train_critic(critic_dataset)
+        log.info("[finetune] critic done")
 
         if self._finetune_cycle_index > 0:
             self._snapshot_actor()
+            log.info("[finetune] finetuning actor on %d rows", len(prepared_actor_df))
             actor_dataset = self._make_actor_dataset(prepared_actor_df)
             self._finetune_actor_with_ppo_like_loss(
                 actor_dataset=actor_dataset,
                 critic=self.critic,
                 previous_actor=self._previous_actor,
             )
+            log.info("[finetune] actor done")
 
         self._finetune_cycle_index += 1
+        log.info("[finetune] cycle %d complete", self._finetune_cycle_index - 1)
 
     def get_actor(self):
         """Return the current actor model for hot-swap in mlm_rl.py."""
@@ -175,11 +184,14 @@ class PPOTrainer(Trainer):
         """
         # Step 1 — load all coverage-increasing (non-orig) queue entries
         mutations = load_mutation_corpus()
+        log.info("[prepare_data] loaded %d mutations", len(mutations))
 
         if not mutations.empty:
             # Step 2 — compute rewards
             if self._rewarder is not None:
+                log.info("[prepare_data] computing rewards via afl-showmap...")
                 mutations = self._rewarder.compute(mutations)
+                log.info("[prepare_data] rewards done")
             else:
                 raise Exception("No rewards in current mutations")
                 #mutations["reward"] = 0.0

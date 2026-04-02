@@ -15,11 +15,15 @@ The IDF vector is recomputed each cycle from the full accumulated bitmap
 history (all valid bitmaps ever seen), matching CovRL's update_idf which
 operates on all processed mutations rather than just the current batch.
 """
+import logging
 import math
 import os
 import subprocess
 
 import numpy as np
+from tqdm import tqdm
+
+log = logging.getLogger(__name__)
 
 NUM_LABELS   = 8
 BUCKET_WIDTH = 2.0 / NUM_LABELS   # width 0.25 over [-1, 1]
@@ -147,10 +151,14 @@ class Rewarder:
         self._afl_showmap_path = os.path.normpath(
             os.path.join(os.path.dirname(__file__), "../../../afl-showmap")
         )
+        if not os.path.isfile(self._afl_showmap_path):
+            raise FileNotFoundError(f"afl-showmap not found: {self._afl_showmap_path}")
         self._interpreter_path = os.path.expanduser(
             "~/Documents/data_store/engines/jerryscript/build/bin/jerry"
         )
-        self._error_map        = _ERROR_MAPS.get("jerry", {})
+        if not os.path.isfile(self._interpreter_path):
+            raise FileNotFoundError(f"interpreter not found: {self._interpreter_path}")
+        self._error_map        = _ERROR_MAPS.get("jerry", {}) # TODO: get from config
         self._tmp_dir          = tmp_dir
         self._bitmap_size      = bitmap_size
         self._idf_alpha        = idf_alpha
@@ -196,7 +204,8 @@ class Rewarder:
         # reward=None marks a valid entry whose TF-IDF reward is computed after
         # the IDF update below.
 
-        for _, row in df.iterrows():
+        log.info("[rewarder] starting afl-showmap loop over %d mutations", len(df))
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="showmap", unit="file"):
             file_id     = str(row["file_id"])
             content     = row["data"]
             input_path  = os.path.join(self._tmp_dir, f"{file_id}.js")
@@ -214,11 +223,12 @@ class Rewarder:
                 "-m", "none", "-t", "5000",
                 "--", self._interpreter_path, input_path,
             ]
+            log.debug("[rewarder] showmap: %s", file_id)
             try:
                 proc = subprocess.run(cmd, capture_output=True, timeout=20)
-            except Exception:
-                results.append({"reward": 0.0, "bitmap": None})
-                continue
+            except Exception as exc:
+                log.warning("[rewarder] showmap failed for %s: %s", file_id, exc)
+                raise Exception("couldn't run afl-showmap")
 
             stderr_text = proc.stderr.decode("utf-8", errors="replace")
             error_type  = _classify_error(stderr_text, self._error_map)
@@ -242,8 +252,8 @@ class Rewarder:
                         if 0 <= edge < self._bitmap_size:
                             bitmap[edge] += int(count_str) if count_str else 1
             except OSError:
+                raise Exception("Couldn't read afl-showmap lines")
                 results.append({"reward": 0.0, "bitmap": None})
-                continue
 
             results.append({"reward": None, "bitmap": bitmap})
 
