@@ -129,36 +129,28 @@ class Rewarder:
 
     def __init__(
         self,
-        afl_showmap_path,
-        interpreter_path,
-        interpreter_target,
         tmp_dir,
         bitmap_size=131072,
         idf_alpha=0.6,
     ):
         """
-        @type  afl_showmap_path:   str
-        @param afl_showmap_path:   Absolute path to the afl-showmap binary.
+        @type  tmp_dir:     str
+        @param tmp_dir:     Directory for temporary input files and showmap output
+                            files.  Created on first compute() call.
 
-        @type  interpreter_path:   str
-        @param interpreter_path:   Absolute path to the target interpreter binary.
+        @type  bitmap_size: int
+        @param bitmap_size: AFL++ coverage map size (default 2^17 = 131072).
 
-        @type  interpreter_target: str
-        @param interpreter_target: Error dialect — "v8", "jsc", "chakra", or "jerry".
-
-        @type  tmp_dir:            str
-        @param tmp_dir:            Directory for temporary input files and showmap
-                                   output files.  Created on first compute() call.
-
-        @type  bitmap_size:        int
-        @param bitmap_size:        AFL++ coverage map size (default 2^17 = 131072).
-
-        @type  idf_alpha:          float
-        @param idf_alpha:          EMA smoothing factor for IDF update (CovRL: 0.6).
+        @type  idf_alpha:   float
+        @param idf_alpha:   EMA smoothing factor for IDF update (CovRL: 0.6).
         """
-        self._afl_showmap_path = afl_showmap_path
-        self._interpreter_path = interpreter_path
-        self._error_map        = _ERROR_MAPS.get(interpreter_target.lower(), {})
+        self._afl_showmap_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "../../../afl-showmap")
+        )
+        self._interpreter_path = os.path.expanduser(
+            "~/Documents/data_store/engines/jerryscript/build/bin/jerry"
+        )
+        self._error_map        = _ERROR_MAPS.get("jerry", {})
         self._tmp_dir          = tmp_dir
         self._bitmap_size      = bitmap_size
         self._idf_alpha        = idf_alpha

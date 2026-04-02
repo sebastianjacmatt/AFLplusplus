@@ -47,9 +47,6 @@ class PPOTrainer(Trainer):
         train_batch_size=4,
         learning_rate=2e-5,
         mask_probability=0.15,
-        afl_showmap_path=None,
-        interpreter_path=None,
-        interpreter_target="v8",
     ):
         """
         @type  actor:              transformers.AutoModelForSeq2SeqLM
@@ -74,20 +71,6 @@ class PPOTrainer(Trainer):
         @param mask_probability:   Fraction of tokens masked per span.
                                    Should match mlm_rl.py MASK_PROBABILITY.
 
-        @type  afl_showmap_path:   str or None
-        @param afl_showmap_path:   Absolute path to the afl-showmap binary.
-                                   When None (or interpreter_path is None), a
-                                   Rewarder is not created and all mutation
-                                   entries receive a 0.0 placeholder reward.
-
-        @type  interpreter_path:   str or None
-        @param interpreter_path:   Absolute path to the target interpreter binary
-                                   (e.g. the jerry or d8 executable).
-
-        @type  interpreter_target: str
-        @param interpreter_target: Error dialect for stderr classification.
-                                   One of "v8", "jsc", "chakra", "jerry".
-                                   Passed to Rewarder at construction.
         """
         self.actor     = actor
         self.tokenizer = tokenizer
@@ -114,17 +97,9 @@ class PPOTrainer(Trainer):
             num_train_epochs=1,
         )
 
-        # Rewarder encapsulates the afl-showmap pipeline and all IDF state.
-        # None when showmap or interpreter paths are not yet configured.
-        if afl_showmap_path is not None and interpreter_path is not None:
-            self._rewarder = Rewarder(
-                afl_showmap_path=afl_showmap_path,
-                interpreter_path=interpreter_path,
-                interpreter_target=interpreter_target,
-                tmp_dir=os.path.join(save_dir, "tmp"),
-            )
-        else:
-            self._rewarder = None
+        self._rewarder = Rewarder(
+            tmp_dir=os.path.join(save_dir, "tmp"),
+        )
 
     # -------------------------------------------------------------------------
     # Trainer interface
