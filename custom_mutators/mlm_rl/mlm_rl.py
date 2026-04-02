@@ -48,11 +48,13 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at http://mozilla.org/MPL/2.0/.
 """
 
+import os
 import random
 
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from covrl.trainer import PPOTrainer
+from utils.data_utils import set_queue_dir
 
 # ---------------------------------------------------------------------------
 # CovRL constants — taken from CovRL AFL 2.52b config.h / afl-fuzz.c.
@@ -103,11 +105,6 @@ _current_seed_token_ids  = None   # token ids from the most recent fuzz_count()
 _finetune_pending        = False  # set by queue_get(), consumed by fuzz_count()
 _queue_get_count = 0
 
-# Finetune bookkeeping
-_pending_new_queue_files = []     # accumulated by queue_new_entry()
-# NOTE: _finetune_cycle_index is owned by TRAINER, not tracked here.
-
-
 # ---------------------------------------------------------------------------
 # AFL++ custom mutator hooks
 # ---------------------------------------------------------------------------
@@ -124,13 +121,13 @@ def init(seed):
     global CONFIG, ACTOR, TOKENIZER, UNKNOWN_TOKEN, TRAINER
     global _current_seed_token_ids
     global _finetune_pending
-    global _pending_new_queue_files
 
     TOKENIZER     = AutoTokenizer.from_pretrained(MODEL_NAME)
     ACTOR         = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME).to(DEVICE)
     UNKNOWN_TOKEN = TOKENIZER.unk_token_id
     ACTOR.eval()
 
+    # TODO: depricated in newest import transformers way of doing MASK_TOKEN
     assert TOKENIZER.mask_token_id == MASK_TOKEN, (
         f"TOKENIZER.mask_token_id={TOKENIZER.mask_token_id} does not match "
         f"MASK_TOKEN={MASK_TOKEN}; update the MASK_TOKEN constant to match"
@@ -146,7 +143,6 @@ def init(seed):
 
     _current_seed_token_ids  = None
     _finetune_pending        = False
-    _pending_new_queue_files = []
 
 
 def deinit():
@@ -171,6 +167,8 @@ def queue_get(filename):
     @return: Always True
     """
     global _finetune_pending, _queue_get_count
+
+    set_queue_dir(os.path.dirname(filename))
 
     _queue_get_count += 1
     print(_queue_get_count)
@@ -203,7 +201,7 @@ def fuzz_count(buf):
     # Trigger finetune before processing the new seed
     if _finetune_pending:
         _finetune_pending = False
-        _finetune(corpus_dir=None)  # TODO pass/define AFL queue dir TODO: we need an efficient storage solution
+        _finetune()
 
     # Tokenize once — fuzz() reuses _current_seed_token_ids
     _current_seed_token_ids = _tokenize(buf)
@@ -263,24 +261,6 @@ def fuzz(buf, add_buf, max_size):
     return bytearray(out_buf)
 
 
-def queue_new_entry(filename_new_queue, filename_orig_queue):
-    """
-    Called after AFL++ adds a new test case to the queue.
-
-    Accumulates new queue filenames for the next finetune cycle.
-
-    @type filename_new_queue: str
-    @param filename_new_queue: Path to the new queue entry
-
-    @type filename_orig_queue: str
-    @param filename_orig_queue: Path to the originating queue entry
-    """
-    global _pending_new_queue_files
-
-    _pending_new_queue_files.append({
-        "new":  filename_new_queue,
-        "orig": filename_orig_queue,
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -458,23 +438,15 @@ def _encode(token_ids):
 # Finetune cycle
 # ---------------------------------------------------------------------------
 
-def _finetune(corpus_dir):
+def _finetune():
     """
     Delegate one staged CovRL finetuning cycle to TRAINER, then hot-swap ACTOR.
 
     All data loading, reward computation, and dataset construction are the
-    trainer's responsibility.  mlm.py passes only corpus_dir.
-
-    @type  corpus_dir: str or None
-    @param corpus_dir: Path to the AFL++ output queue directory.
-                       None until Stage 2 corpus loading is implemented.
+    trainer's responsibility.
     """
-    global _pending_new_queue_files
-
-    TRAINER.finetune(corpus_dir)
+    TRAINER.finetune()
     _reload_actor()
-
-    _pending_new_queue_files = []
 
 
 def _reload_actor():

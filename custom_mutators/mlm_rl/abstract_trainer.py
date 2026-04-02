@@ -11,16 +11,13 @@ class Trainer(ABC):
     """
 
     @abstractmethod
-    def finetune(self, corpus_dir):
+    def finetune(self):
         """
-        Run one full training cycle over the AFL++ queue at corpus_dir.
+        Run one full training cycle over the current AFL++ queue.
 
-        mlm_rl.py passes only the queue directory — data loading, reward
-        computation, dataset construction, and the training loop are the
-        trainer's responsibility.
-
-        @type  corpus_dir: str or None
-        @param corpus_dir: Path to the AFL++ output queue directory.
+        The queue directory is configured separately via data_utils.set_queue_dir.
+        Data loading, reward computation, dataset construction, and the training
+        loop are the trainer's responsibility.
         """
         pass
 
