@@ -22,7 +22,7 @@ Usage::
     cd /path/to/AFLplusplus && make
 
     # 2. Install Python dependencies
-    pip install torch transformers
+    cd /path/to/AFLplusplus/custom_mutators/mlm_rl && conda env create -f environment.yml
 
     # 3. Run — PYTHONPATH must point to the directory containing mlm_rl.py,
     #    AFL_PYTHON_MODULE is the module name without .py,
@@ -52,7 +52,7 @@ import random
 
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-from covrl_trainer import PPOTrainer
+from covrl.trainer import PPOTrainer
 
 # ---------------------------------------------------------------------------
 # CovRL constants — taken from CovRL AFL 2.52b config.h / afl-fuzz.c.
@@ -64,7 +64,7 @@ DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 # CovRL SYNC_INTERVAL=100 — seeds between finetune triggers.
 # Named FINETUNE_INTERVAL here to avoid confusion with AFL++ SYNC_INTERVAL=8,
 # which is an entirely different concept (inter-fuzzer queue sync).
-FINETUNE_INTERVAL  = 100
+FINETUNE_INTERVAL  = 2
 
 # Fixed mutation budget returned by fuzz_count() for every seed.
 # TODO: revisit once adaptive energy scheduling.
@@ -93,6 +93,7 @@ SAVE_DIR = "./covrl_checkpoints"
 CONFIG        = None   # loaded config object  TODO:
 ACTOR         = None   # AutoModelForSeq2SeqLM (loaded in init)
 TOKENIZER     = None   # AutoTokenizer         (loaded in init)
+# TODO: change the way we provide UNKNOWN_TOKEN, we had to downgrade transformers because of this
 UNKNOWN_TOKEN = None   # TOKENIZER.unk_token_id (set in init after tokenizer loads)
 TRAINER       = None   # PPOTrainer (created in init, owns _finetune_cycle_index)
 
@@ -100,6 +101,7 @@ TRAINER       = None   # PPOTrainer (created in init, owns _finetune_cycle_index
 _current_seed_token_ids  = None   # token ids from the most recent fuzz_count()
 # TODO: _call_index              = 0      # fuzz() call index within the current seed's window
 _finetune_pending        = False  # set by queue_get(), consumed by fuzz_count()
+_queue_get_count = 0
 
 # Finetune bookkeeping
 _pending_new_queue_files = []     # accumulated by queue_new_entry()
@@ -168,10 +170,11 @@ def queue_get(filename):
     @rtype: bool
     @return: Always True
     """
-    global _finetune_pending
+    global _finetune_pending, _queue_get_count
 
-    # finetun    
-    if len(_pending_new_queue_files) % FINETUNE_INTERVAL == 0:
+    _queue_get_count += 1
+    print(_queue_get_count)
+    if not (_queue_get_count == 0) and _queue_get_count % FINETUNE_INTERVAL == 0:
         _finetune_pending = True
 
     return True

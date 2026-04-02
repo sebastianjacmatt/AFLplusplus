@@ -1,0 +1,17 @@
+name: covrl
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - tqdm
+  - psutil
+  - numpy
+  - pandas
+  - pip
+  - pip:
+      - torch
+      - transformers==4.44.2
+      - tokenizers==0.19.1
+      - accelerate
+      - protobuf
+      - sentencepiece

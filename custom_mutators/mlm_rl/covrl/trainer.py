@@ -154,6 +154,10 @@ class PPOTrainer(Trainer):
         """
         prepared_critic_df, prepared_actor_df = self._prepare_data(corpus_dir)
 
+        if prepared_critic_df.empty:
+            raise Exception("afl found no new queue entries before finetuning")
+            return
+
         critic_dataset = self._make_critic_dataset(prepared_critic_df)
         self._train_critic(critic_dataset)
 
