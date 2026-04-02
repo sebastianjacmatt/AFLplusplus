@@ -34,7 +34,7 @@ class SpanMaskingMixin:
         num_noise_spans = max(1, int(round(num_noise_tokens / self.poisson_lambda)))
 
         def _segment(total, n):
-            splits = np.cumsum(np.random.multinomial(total - n, [1.0] * n)) + 1
+            splits = np.cumsum(np.random.multinomial(total - n, [1.0 / n] * n)) + 1
             return np.diff(np.insert(splits, 0, 0))
 
         noise_lens    = _segment(num_noise_tokens, num_noise_spans)
