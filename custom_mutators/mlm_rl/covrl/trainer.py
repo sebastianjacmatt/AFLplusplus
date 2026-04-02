@@ -98,6 +98,7 @@ class PPOTrainer(Trainer):
             save_strategy="no",
             load_best_model_at_end=False,
             num_train_epochs=1,
+            remove_unused_columns=False,
         )
 
         self._rewarder = Rewarder(
