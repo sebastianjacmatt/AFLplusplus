@@ -10,23 +10,29 @@ classification loss.  label_to_score converts a predicted bucket index back
 to the bucket midpoint for use as a scalar signal in the actor's PPO
 advantage computation.
 
-Rewarder encapsulates the afl-showmap pipeline and all persistent IDF state.
-The IDF vector is recomputed each cycle from the full accumulated bitmap
-history (all valid bitmaps ever seen), matching CovRL's update_idf which
-operates on all processed mutations rather than just the current batch.
+Rewarder maintains a persistent DataFrame across calls (keyed by the is_orig
+flag) so that afl-showmap is run only on newly submitted entries — matching
+CovRL's fit() / is_orig semantics.  Parallel execution uses a multiprocessing
+Pool (module-level _showmap_worker for pickling compatibility).
+
+Override _compute_valid_rewards() in a subclass to plug in an alternative
+reward strategy (e.g. GRPO group-relative normalisation) without touching
+the showmap pipeline or IDF machinery.
 """
 import logging
 import math
 import os
 import subprocess
+from multiprocessing import Pool
 
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
 log = logging.getLogger(__name__)
 
 NUM_LABELS   = 8
-BUCKET_WIDTH = 2.0 / NUM_LABELS   # width 0.25 over [-1, 1]
+BUCKET_WIDTH = 2.0 / NUM_LABELS   # 0.25 over [-1, 1]
 
 
 def score_to_label(score):
@@ -43,8 +49,6 @@ def label_to_score(label):
 # Error classification — keyed by interpreter target name
 # ---------------------------------------------------------------------------
 
-# Each inner dict maps a stderr substring to either "syntaxError" or
-# "semanticError".  First match wins (order matters only within each dict).
 _ERROR_MAPS = {
     "v8": {
         "SyntaxError:":               "syntaxError",
@@ -83,22 +87,68 @@ _ERROR_MAPS = {
 
 
 def _classify_error(stderr_text, error_map):
-    """
-    Return the error type string for the first matching pattern, or None.
-
-    @type  stderr_text: str
-    @param stderr_text: Decoded stderr from the interpreter run.
-
-    @type  error_map:   dict
-    @param error_map:   Pattern → error-type mapping for the target interpreter.
-
-    @rtype:  str or None
-    @return: "syntaxError", "semanticError", or None (no error detected).
-    """
     for pattern, error_type in error_map.items():
         if pattern in stderr_text:
             return error_type
     return None
+
+
+# ---------------------------------------------------------------------------
+# Pool worker — module-level so multiprocessing can pickle it
+# ---------------------------------------------------------------------------
+
+def _showmap_worker(args):
+    """
+    Run afl-showmap for a single file and parse the coverage bitmap.
+
+    Returns a dict with keys:
+        file_id (str)
+        bitmap  (np.ndarray[int32] | None) — None when an error reward is set
+        reward  (float | None)             — None when TF-IDF must be computed
+    """
+    afl_showmap_path, interpreter_path, tmp_dir, bitmap_size, error_map, file_id, content = args
+
+    input_path  = os.path.join(tmp_dir, f"{file_id}.js")
+    showmap_out = os.path.join(tmp_dir, f"cov_{file_id}")
+
+    try:
+        with open(input_path, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(content)
+    except OSError as exc:
+        raise OSError(f"Failed to write input file for {file_id}: {exc}")
+
+    cmd = [
+        afl_showmap_path, "-o", showmap_out,
+        "-m", "none", "-t", "5000",
+        "--", interpreter_path, input_path,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=20)
+    except Exception as exc:
+        raise RuntimeError(f"afl-showmap subprocess failed for {file_id}: {exc}")
+
+    stderr_text = proc.stderr.decode("utf-8", errors="replace")
+    error_type  = _classify_error(stderr_text, error_map)
+    if error_type == "syntaxError":
+        return {"file_id": file_id, "bitmap": None, "reward": -1.0}
+    if error_type is not None:
+        return {"file_id": file_id, "bitmap": None, "reward": -0.5}
+
+    bitmap = np.zeros(bitmap_size, dtype=np.int32)
+    try:
+        with open(showmap_out, "r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                edge_str, _, count_str = line.partition(":")
+                edge = int(edge_str)
+                if 0 <= edge < bitmap_size:
+                    bitmap[edge] += int(count_str) if count_str else 1
+    except OSError as exc:
+        raise OSError(f"Failed to read afl-showmap output for {file_id}: {exc}")
+
+    return {"file_id": file_id, "bitmap": bitmap, "reward": None}
 
 
 # ---------------------------------------------------------------------------
@@ -107,28 +157,23 @@ def _classify_error(stderr_text, error_map):
 
 class Rewarder:
     """
-    afl-showmap reward pipeline with persistent IDF state.
+    afl-showmap reward pipeline with persistent dataset tracking and pooled execution.
 
-    Stable configuration (binary paths, interpreter target, temp directory)
-    is bound at construction.  compute(new_mutations_df) is called once per
-    finetune cycle with the batch of new mutation entries.
+    The persistent DataFrame (flagged with is_orig) ensures afl-showmap is run only
+    on entries not previously submitted — mirroring CovRL's fit() / is_orig semantics.
+    Parallel afl-showmap calls are dispatched through a multiprocessing Pool.
 
     IDF weighting follows CovRL's update_idf (paper Eq. 5):
+        df_counts = per-edge document-frequency over all valid bitmaps ever seen
+        new_idf   = (log(N / (1 + df_counts)) / sqrt(bitmap_size)) * (1 - alpha)
+        idf       = alpha * old_idf + new_idf
 
-      df_counts = per-edge document-frequency over all valid bitmaps ever seen
-      new_idf   = (log(N / (1 + df_counts)) / sqrt(bitmap_size)) * (1 - alpha)
-      idf       = alpha * old_idf + new_idf
+    where N is the running count of all entries ever submitted (including failures).
 
-    where N is the running count of all entries ever submitted to compute()
-    (including failed and error entries), matching CovRL's use of
-    total_docs = dataset.shape[0].  The IDF is updated from the full
-    accumulated bitmap history rather than only the current batch, which
-    ensures that each new cycle's reward computation benefits from all
-    coverage signal seen so far.
-
-    Bitmaps are kept in memory across cycles as int32 arrays.  At AFL++
-    map_size=2^17 each entry uses 512 KB; for runs accumulating thousands
-    of mutations the total will grow proportionally.
+    Subclass and override _compute_valid_rewards() to implement an alternative
+    reward strategy without touching the showmap pipeline or IDF state.
+    For GRPO: override to receive bitmaps, compute raw TF-IDF scores, then apply
+    group-relative normalisation using group metadata stored in self._dataset.
     """
 
     def __init__(
@@ -136,17 +181,13 @@ class Rewarder:
         tmp_dir,
         bitmap_size=131072,
         idf_alpha=0.6,
+        n_workers=1,
     ):
         """
-        @type  tmp_dir:     str
-        @param tmp_dir:     Directory for temporary input files and showmap output
-                            files.  Created on first compute() call.
-
-        @type  bitmap_size: int
+        @param tmp_dir:     Directory for temporary input files and showmap output.
         @param bitmap_size: AFL++ coverage map size (default 2^17 = 131072).
-
-        @type  idf_alpha:   float
         @param idf_alpha:   EMA smoothing factor for IDF update (CovRL: 0.6).
+        @param n_workers:   Number of parallel Pool workers for afl-showmap.
         """
         self._afl_showmap_path = os.path.normpath(
             os.path.join(os.path.dirname(__file__), "../../../afl-showmap")
@@ -158,132 +199,178 @@ class Rewarder:
         )
         if not os.path.isfile(self._interpreter_path):
             raise FileNotFoundError(f"interpreter not found: {self._interpreter_path}")
-        self._error_map        = _ERROR_MAPS.get("jerry", {}) # TODO: get from config
-        self._tmp_dir          = tmp_dir
-        self._bitmap_size      = bitmap_size
-        self._idf_alpha        = idf_alpha
-        self._map_size_pow2    = math.sqrt(bitmap_size)
+        self._error_map     = _ERROR_MAPS.get("jerry", {})  # TODO: get from config
+        self._tmp_dir       = tmp_dir
+        self._bitmap_size   = bitmap_size
+        self._idf_alpha     = idf_alpha
+        self._map_size_pow2 = math.sqrt(bitmap_size)
+        self._n_workers     = n_workers
 
         # IDF vector — updated from the full bitmap history on every cycle.
         self._idf_vector     = np.zeros(bitmap_size, dtype=float)
-        # All valid bitmaps accumulated across cycles, used to recompute IDF
-        # from the full history each call (CovRL update_idf alignment).
+        # All valid bitmaps accumulated across compute() calls, used for IDF.
         self._bitmap_history = []   # list[np.ndarray shape (bitmap_size,), int32]
-        self._total_seen     = 0    # total entries ever submitted, including failures
+        self._total_seen     = 0    # total entries ever submitted (including failures)
+
+        # Persistent dataset with is_orig flag, mirroring CovRL's dataset.
+        # Columns: file_id, data, is_orig, bitmap, reward
+        # Extra columns from the caller's DataFrame (e.g. group_id for GRPO)
+        # are preserved automatically by pd.concat.
+        self._dataset = pd.DataFrame(
+            columns=["file_id", "data", "is_orig", "bitmap", "reward"]
+        )
 
     @property
     def idf_vector(self):
         """Read-only view of the current IDF weight vector."""
         return self._idf_vector
 
+    @property
+    def dataset(self):
+        """Read-only view of the full persistent dataset."""
+        return self._dataset
+
     def compute(self, new_mutations_df):
         """
-        Run afl-showmap on each row in new_mutations_df, update the IDF vector
-        from the full accumulated bitmap history, and assign scalar rewards.
+        Merge new mutations into the persistent dataset, run afl-showmap on
+        unprocessed rows only, update the IDF from the full bitmap history,
+        and assign scalar rewards.
 
-        Reward assignment:
-          SyntaxError in stderr  → -1.0
-          other runtime error    → -0.5
-          showmap I/O failure    → 0.0
-          valid (no error)       → sigmoid(log(TF-IDF)); 0.0 when TF-IDF == 0
+        Rows are marked is_orig=False on entry and is_orig=True after processing;
+        subsequent calls will never re-submit already-processed entries to showmap.
+        This matches CovRL's fit() / update_idf / is_orig semantics.
 
-        The IDF is updated before TF-IDF rewards are computed so that entries
-        in the current batch benefit from the full accumulated coverage signal.
+        Extra columns in new_mutations_df (e.g. group_id) are preserved in
+        self._dataset and are accessible to _compute_valid_rewards() overrides.
 
-        @type  new_mutations_df: pd.DataFrame
-        @param new_mutations_df: Rows with at least ["file_id", "data"] columns.
-                                 Must contain only entries not previously submitted.
-
-        @rtype:  pd.DataFrame
-        @return: Copy of new_mutations_df with "reward" column added.
+        @param new_mutations_df: DataFrame with at least ["file_id", "data"].
+        @return: new_mutations_df with "reward" column added.
         """
         os.makedirs(self._tmp_dir, exist_ok=True)
 
-        df      = new_mutations_df.copy()
-        results = []   # {"reward": float or None, "bitmap": np.ndarray or None}
-        # reward=None marks a valid entry whose TF-IDF reward is computed after
-        # the IDF update below.
+        # Merge new rows into the persistent dataset with is_orig=False.
+        new_rows            = new_mutations_df.copy()
+        new_rows["is_orig"] = False
+        new_rows["bitmap"]  = None
+        new_rows["reward"]  = 0.0
+        self._dataset = pd.concat([self._dataset, new_rows], ignore_index=True)
 
-        log.info("[rewarder] starting afl-showmap loop over %d mutations", len(df))
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="showmap", unit="file"):
-            file_id     = str(row["file_id"])
-            content     = row["data"]
-            input_path  = os.path.join(self._tmp_dir, f"{file_id}.js")
-            showmap_out = os.path.join(self._tmp_dir, f"cov_{file_id}")
+        # Select only unprocessed entries — mirrors CovRL's dataset[~dataset["is_orig"]].
+        unprocessed_mask = ~self._dataset["is_orig"]
+        unprocessed      = self._dataset[unprocessed_mask]
 
-            try:
-                with open(input_path, "w", encoding="utf-8", errors="replace") as fh:
-                    fh.write(content)
-            except OSError:
-                results.append({"reward": 0.0, "bitmap": None})
-                continue
+        if unprocessed.empty:
+            log.info("[rewarder] no new entries to process")
+            return new_mutations_df.assign(reward=0.0)
 
-            cmd = [
-                self._afl_showmap_path, "-o", showmap_out,
-                "-m", "none", "-t", "5000",
-                "--", self._interpreter_path, input_path,
-            ]
-            log.debug("[rewarder] showmap: %s", file_id)
-            try:
-                proc = subprocess.run(cmd, capture_output=True, timeout=20)
-            except Exception as exc:
-                log.warning("[rewarder] showmap failed for %s: %s", file_id, exc)
-                raise Exception("couldn't run afl-showmap")
+        # Build pool worker arguments (one tuple per unprocessed entry).
+        worker_args = [
+            (
+                self._afl_showmap_path,
+                self._interpreter_path,
+                self._tmp_dir,
+                self._bitmap_size,
+                self._error_map,
+                str(row["file_id"]),
+                row["data"],
+            )
+            for _, row in unprocessed.iterrows()
+        ]
 
-            stderr_text = proc.stderr.decode("utf-8", errors="replace")
-            error_type  = _classify_error(stderr_text, self._error_map)
-            if error_type == "syntaxError":
-                results.append({"reward": -1.0, "bitmap": None})
-                continue
-            if error_type is not None:
-                results.append({"reward": -0.5, "bitmap": None})
-                continue
-
-            # Parse edge:count lines written by afl-showmap to showmap_out
-            bitmap = np.zeros(self._bitmap_size, dtype=np.int32)
-            try:
-                with open(showmap_out, "r") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        edge_str, _, count_str = line.partition(":")
-                        edge = int(edge_str)
-                        if 0 <= edge < self._bitmap_size:
-                            bitmap[edge] += int(count_str) if count_str else 1
-            except OSError:
-                raise Exception("Couldn't read afl-showmap lines")
-                results.append({"reward": 0.0, "bitmap": None})
-
-            results.append({"reward": None, "bitmap": bitmap})
-
-        # Accumulate new valid bitmaps and update total seen count
-        self._bitmap_history.extend(
-            r["bitmap"] for r in results if r["bitmap"] is not None
+        log.info(
+            "[rewarder] afl-showmap on %d new entries (workers=%d)",
+            len(worker_args), self._n_workers,
         )
-        self._total_seen += len(results)
+        with Pool(self._n_workers) as pool:
+            raw_results = list(
+                tqdm(
+                    pool.imap(_showmap_worker, worker_args),
+                    total=len(worker_args),
+                    desc="showmap",
+                    unit="file",
+                )
+            )
 
-        # Recompute IDF from the full accumulated bitmap history.
-        # df_counts is the per-edge document frequency over all valid bitmaps
-        # ever seen; total_docs includes all entries (failures count as docs).
-        if self._bitmap_history:
-            bitmap_matrix    = np.vstack(self._bitmap_history)
-            df_counts        = np.sum(bitmap_matrix > 0, axis=0).astype(float)
-            total_docs       = float(self._total_seen)
-            new_idf          = (
-                np.log(total_docs / (1.0 + df_counts)) / self._map_size_pow2
-            ) * (1.0 - self._idf_alpha)
-            self._idf_vector = self._idf_alpha * self._idf_vector + new_idf
+        # result_map keyed by file_id for O(1) write-back.
+        result_map = {r["file_id"]: r for r in raw_results}
 
-        # Assign TF-IDF rewards to valid entries using the freshly updated IDF
-        for r in results:
-            if r["reward"] is None:
-                tfidf = float(np.dot(r["bitmap"], self._idf_vector))
-                if tfidf > 0.0:
-                    log_score  = math.log(tfidf)
-                    r["reward"] = round(1.0 / (1.0 + math.exp(-log_score)), 2)
-                else:
-                    r["reward"] = 0.0
+        # Accumulate valid bitmaps and update the total seen count.
+        self._bitmap_history.extend(
+            r["bitmap"] for r in raw_results if r["bitmap"] is not None
+        )
+        self._total_seen += len(raw_results)
 
-        df["reward"] = [r["reward"] for r in results]
-        return df
+        # Recompute IDF from the full accumulated bitmap history (CovRL: update_idf).
+        self._update_idf()
+
+        # Assign TF-IDF rewards to valid entries using the freshly updated IDF.
+        # reward=None marks valid entries; errors already carry -1.0 / -0.5.
+        valid_results = [r for r in raw_results if r["reward"] is None]
+        if valid_results:
+            valid_bitmaps = [r["bitmap"] for r in valid_results]
+            valid_rewards = self._compute_valid_rewards(valid_bitmaps)
+            for r, reward in zip(valid_results, valid_rewards):
+                r["reward"] = reward
+
+        # Write results back into the persistent dataset and mark is_orig=True.
+        for idx in unprocessed.index:
+            file_id = str(self._dataset.at[idx, "file_id"])
+            r = result_map[file_id]
+            self._dataset.at[idx, "is_orig"] = True
+            self._dataset.at[idx, "bitmap"]  = r["bitmap"]
+            self._dataset.at[idx, "reward"]  = r["reward"]
+
+        # Return the caller's DataFrame with rewards attached.
+        fid_to_reward = {
+            str(self._dataset.at[idx, "file_id"]): self._dataset.at[idx, "reward"]
+            for idx in unprocessed.index
+        }
+        result_df           = new_mutations_df.copy()
+        result_df["reward"] = result_df["file_id"].astype(str).map(fid_to_reward)
+        return result_df
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _update_idf(self):
+        """
+        Recompute the IDF vector from the full accumulated bitmap history.
+        Matches CovRL's update_idf (paper Eq. 5).
+        """
+        if not self._bitmap_history:
+            return
+        bitmap_matrix    = np.vstack(self._bitmap_history)
+        df_counts        = np.sum(bitmap_matrix > 0, axis=0).astype(float)
+        total_docs       = float(self._total_seen)
+        new_idf          = (
+            np.log(total_docs / (1.0 + df_counts)) / self._map_size_pow2
+        ) * (1.0 - self._idf_alpha)
+        self._idf_vector = self._idf_alpha * self._idf_vector + new_idf
+
+    def _compute_valid_rewards(self, bitmaps):
+        """
+        Compute scalar rewards for a list of valid (non-error) bitmaps.
+
+        Override in a subclass to implement an alternative reward strategy.
+        The default applies per-entry TF-IDF scoring (CovRL Eq. 5) against the
+        current IDF vector, then sigmoid-compresses to (0, 1].
+
+        For GRPO: override to compute raw TF-IDF scores across the batch, then
+        apply group-relative normalisation.  Group metadata (e.g. group_id) is
+        accessible via self._dataset if it was present in the input DataFrame.
+
+        @param bitmaps: list[np.ndarray] of shape (bitmap_size,), one per valid entry,
+                        in the same order as the unprocessed rows submitted to compute().
+        @return:        list[float] of scalar rewards, same length as bitmaps.
+        """
+        rewards = []
+        for bitmap in bitmaps:
+            tfidf = float(np.dot(bitmap, self._idf_vector))
+            if tfidf > 0.0:
+                log_score = math.log(tfidf)
+                reward    = round(1.0 / (1.0 + math.exp(-log_score)), 2)
+            else:
+                reward = 0.0
+            rewards.append(reward)
+        return rewards
