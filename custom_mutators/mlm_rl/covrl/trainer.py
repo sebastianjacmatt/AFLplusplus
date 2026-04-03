@@ -260,6 +260,11 @@ class PPOTrainer(Trainer):
         if self.critic is None:
             self.setup_critic()
 
+        # Restore requires_grad — critic parameters are frozen in-place by
+        # _finetune_actor_with_ppo_like_loss each cycle and never unfrozen.
+        # .train() only restores dropout/batchnorm mode, not requires_grad.
+        for p in self.critic.parameters():
+            p.requires_grad_(True)
         self.critic.train()
         trainer = HFTrainer(
             model=self.critic,
