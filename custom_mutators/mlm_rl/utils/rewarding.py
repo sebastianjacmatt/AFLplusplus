@@ -23,7 +23,7 @@ import logging
 import math
 import os
 import subprocess
-from multiprocessing import Pool
+import multiprocessing
 
 import numpy as np
 import pandas as pd
@@ -302,15 +302,26 @@ class Rewarder:
             "[rewarder] afl-showmap on %d new entries (workers=%d)",
             len(worker_args), self._n_workers,
         )
-        with Pool(self._n_workers) as pool:
-            raw_results = list(
-                tqdm(
-                    pool.imap(_showmap_worker, worker_args),
-                    total=len(worker_args),
-                    desc="showmap",
-                    unit="file",
+        if self._n_workers == 1:
+            # Sequential path — avoids multiprocessing.fork() inside AFL++, which
+            # inherits the fork-server FDs and shared memory and deadlocks on cleanup.
+            raw_results = [
+                _showmap_worker(args)
+                for args in tqdm(worker_args, desc="showmap", unit="file")
+            ]
+        else:
+            # Spawn context: worker processes are created fresh (no fork), so they
+            # do not inherit AFL++'s shared memory or fork-server state.
+            ctx = multiprocessing.get_context("spawn")
+            with ctx.Pool(self._n_workers) as pool:
+                raw_results = list(
+                    tqdm(
+                        pool.imap(_showmap_worker, worker_args),
+                        total=len(worker_args),
+                        desc="showmap",
+                        unit="file",
+                    )
                 )
-            )
 
         # result_map keyed by file_id for O(1) write-back.
         result_map = {r["file_id"]: r for r in raw_results}

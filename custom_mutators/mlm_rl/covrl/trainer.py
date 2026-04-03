@@ -50,6 +50,7 @@ class PPOTrainer(Trainer):
         train_batch_size=4,
         learning_rate=2e-5,
         mask_probability=0.15,
+        n_showmap_workers=8,
     ):
         """
         @type  actor:              transformers.AutoModelForSeq2SeqLM
@@ -73,6 +74,13 @@ class PPOTrainer(Trainer):
         @type  mask_probability:   float
         @param mask_probability:   Fraction of tokens masked per span.
                                    Should match mlm_rl.py MASK_PROBABILITY.
+
+        @type  n_showmap_workers:  int
+        @param n_showmap_workers:  Number of parallel afl-showmap workers.  AFL++
+                                   occupies one core; the remaining cores are free
+                                   for showmap.  Uses multiprocessing spawn context
+                                   (no AFL++ fork-server state inherited).
+                                   Set to 1 to run sequentially (safest, slowest).
 
         """
         self.actor     = actor
@@ -103,6 +111,7 @@ class PPOTrainer(Trainer):
 
         self._rewarder = Rewarder(
             tmp_dir=os.path.join(save_dir, "tmp"),
+            n_workers=n_showmap_workers,
         )
 
     # -------------------------------------------------------------------------
