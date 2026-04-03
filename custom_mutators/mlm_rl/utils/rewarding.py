@@ -128,13 +128,19 @@ def _showmap_worker(args):
         raise RuntimeError(f"afl-showmap subprocess failed for {file_id}: {exc}")
 
     stderr_text = proc.stderr.decode("utf-8", errors="replace")
-    error_type  = _classify_error(stderr_text, error_map)
-    if error_type == "syntaxError":
-        return {"file_id": file_id, "bitmap": None, "reward": -1.0}
-    if error_type is not None:
+    stdout_text = proc.stdout.decode("utf-8", errors="replace")
+
+    # Discrepancy 3: interpreter crash — detected before error-string lookup,
+    # matching CovRL's SEGV/assertion guard.  Bitmap may be partial or absent.
+    if "SEGV" in stderr_text or "assertion" in stdout_text:
         return {"file_id": file_id, "bitmap": None, "reward": -0.5}
 
-    bitmap = np.zeros(bitmap_size, dtype=np.int32)
+    error_type = _classify_error(stderr_text, error_map)
+
+    # Discrepancy 2: always attempt to read the bitmap regardless of error type,
+    # matching CovRL which includes error-entry bitmaps in IDF computation.
+    bitmap         = np.zeros(bitmap_size, dtype=np.int32)
+    bitmap_readable = False
     try:
         with open(showmap_out, "r") as fh:
             for line in fh:
@@ -145,8 +151,20 @@ def _showmap_worker(args):
                 edge = int(edge_str)
                 if 0 <= edge < bitmap_size:
                     bitmap[edge] += int(count_str) if count_str else 1
-    except OSError as exc:
-        raise OSError(f"Failed to read afl-showmap output for {file_id}: {exc}")
+        bitmap_readable = True
+    except OSError:
+        # For error entries this is expected (interpreter may not have produced
+        # any coverage output).  For valid entries we raise below.
+        bitmap = None
+
+    if error_type == "syntaxError":
+        return {"file_id": file_id, "bitmap": bitmap, "reward": -1.0}
+    if error_type is not None:
+        return {"file_id": file_id, "bitmap": bitmap, "reward": -0.5}
+
+    # Valid entry — showmap output must be present.
+    if not bitmap_readable:
+        raise OSError(f"Failed to read afl-showmap output for {file_id}")
 
     return {"file_id": file_id, "bitmap": bitmap, "reward": None}
 
@@ -208,7 +226,7 @@ class Rewarder:
 
         # IDF vector — updated from the full bitmap history on every cycle.
         self._idf_vector     = np.zeros(bitmap_size, dtype=float)
-        # All valid bitmaps accumulated across compute() calls, used for IDF.
+        # All bitmaps accumulated across compute() calls (valid and error entries), used for IDF.
         self._bitmap_history = []   # list[np.ndarray shape (bitmap_size,), int32]
         self._total_seen     = 0    # total entries ever submitted (including failures)
 
@@ -371,6 +389,8 @@ class Rewarder:
                 log_score = math.log(tfidf)
                 reward    = round(1.0 / (1.0 + math.exp(-log_score)), 2)
             else:
-                reward = 0.0
+                # Discrepancy 1: match CovRL's log(0)→0 substitution so that
+                # sigmoid(0) = 0.5 is returned, not 0.0.
+                reward = 0.5
             rewards.append(reward)
         return rewards
