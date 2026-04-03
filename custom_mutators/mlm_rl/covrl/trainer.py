@@ -76,11 +76,11 @@ class PPOTrainer(Trainer):
                                    Should match mlm_rl.py MASK_PROBABILITY.
 
         @type  n_showmap_workers:  int
-        @param n_showmap_workers:  Number of parallel afl-showmap workers.  AFL++
+        @param n_showmap_workers:  Number of parallel afl-showmap threads.  AFL++
                                    occupies one core; the remaining cores are free
-                                   for showmap.  Uses multiprocessing spawn context
-                                   (no AFL++ fork-server state inherited).
-                                   Set to 1 to run sequentially (safest, slowest).
+                                   for showmap.  Uses ThreadPoolExecutor — subprocess.run
+                                   releases the GIL during os.waitpid so threads achieve
+                                   true parallelism with zero process-spawn overhead.
 
         """
         self.actor     = actor

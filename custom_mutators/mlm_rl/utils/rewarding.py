@@ -23,7 +23,7 @@ import logging
 import math
 import os
 import subprocess
-import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -179,7 +179,9 @@ class Rewarder:
 
     The persistent DataFrame (flagged with is_orig) ensures afl-showmap is run only
     on entries not previously submitted — mirroring CovRL's fit() / is_orig semantics.
-    Parallel afl-showmap calls are dispatched through a multiprocessing Pool.
+    Parallel afl-showmap calls are dispatched through a ThreadPoolExecutor: subprocess.run
+    releases the GIL during os.waitpid, giving true I/O parallelism with no process-spawn
+    overhead and no AFL++ fork-server conflicts.
 
     IDF weighting follows CovRL's update_idf (paper Eq. 5):
         df_counts = per-edge document-frequency over all valid bitmaps ever seen
@@ -302,26 +304,21 @@ class Rewarder:
             "[rewarder] afl-showmap on %d new entries (workers=%d)",
             len(worker_args), self._n_workers,
         )
-        if self._n_workers == 1:
-            # Sequential path — avoids multiprocessing.fork() inside AFL++, which
-            # inherits the fork-server FDs and shared memory and deadlocks on cleanup.
-            raw_results = [
-                _showmap_worker(args)
-                for args in tqdm(worker_args, desc="showmap", unit="file")
-            ]
-        else:
-            # Spawn context: worker processes are created fresh (no fork), so they
-            # do not inherit AFL++'s shared memory or fork-server state.
-            ctx = multiprocessing.get_context("spawn")
-            with ctx.Pool(self._n_workers) as pool:
-                raw_results = list(
-                    tqdm(
-                        pool.imap(_showmap_worker, worker_args),
-                        total=len(worker_args),
-                        desc="showmap",
-                        unit="file",
-                    )
+        # ThreadPoolExecutor runs _showmap_worker calls in parallel threads.
+        # subprocess.run releases the GIL while waiting for each afl-showmap
+        # child to exit (os.waitpid is a blocking syscall), so threads achieve
+        # true parallelism with no process-spawn overhead and no AFL++ fork-server
+        # conflicts (no Python process is forked; only afl-showmap subprocesses
+        # are created, which are independent of AFL++'s fork-server state).
+        with ThreadPoolExecutor(max_workers=self._n_workers) as executor:
+            raw_results = list(
+                tqdm(
+                    executor.map(_showmap_worker, worker_args),
+                    total=len(worker_args),
+                    desc="showmap",
+                    unit="file",
                 )
+            )
 
         # result_map keyed by file_id for O(1) write-back.
         result_map = {r["file_id"]: r for r in raw_results}
