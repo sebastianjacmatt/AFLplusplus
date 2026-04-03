@@ -274,7 +274,10 @@ class Rewarder:
         self._dataset = pd.concat([self._dataset, new_rows], ignore_index=True)
 
         # Select only unprocessed entries — mirrors CovRL's dataset[~dataset["is_orig"]].
-        unprocessed_mask = ~self._dataset["is_orig"]
+        # Cast to bool explicitly: pd.concat with an empty DataFrame produces object
+        # dtype for is_orig, and ~object_bool yields -1/-2 (bitwise NOT) instead of
+        # a proper boolean mask, causing pandas to treat it as column labels.
+        unprocessed_mask = ~self._dataset["is_orig"].astype(bool)
         unprocessed      = self._dataset[unprocessed_mask]
 
         if unprocessed.empty:
