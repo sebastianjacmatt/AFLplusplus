@@ -77,7 +77,7 @@ FINETUNE_INTERVAL  = 2
 
 # Fixed mutation budget returned by fuzz_count() for every seed.
 # TODO: revisit once adaptive energy scheduling.
-FUZZ_COUNT         = 128
+FUZZ_COUNT         = 32
 
 MASK_TOKEN         = 4      # sentinel token inserted at mutation positions
 MASK_COUNT         = 3      # max masks inserted per mutation step
