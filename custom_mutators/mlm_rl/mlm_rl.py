@@ -60,51 +60,33 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from run_config    import CONFIG as _RUN_CONFIG
 from covrl.trainer import PPOTrainer
+from grpo.trainer  import GRPOTrainer
 from utils.data_utils import set_queue_dir
-
-# ---------------------------------------------------------------------------
-# CovRL constants — taken from CovRL AFL 2.52b config.h / afl-fuzz.c.
-# ---------------------------------------------------------------------------
-
-MODEL_NAME = "Salesforce/codet5p-220m"
-DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
-
-# CovRL SYNC_INTERVAL=100 — seeds between finetune triggers.
-# Named FINETUNE_INTERVAL here to avoid confusion with AFL++ SYNC_INTERVAL=8,
-# which is an entirely different concept (inter-fuzzer queue sync).
-FINETUNE_INTERVAL  = 2
-
-# Fixed mutation budget returned by fuzz_count() for every seed.
-# TODO: revisit once adaptive energy scheduling.
-FUZZ_COUNT         = 32
-
-MASK_TOKEN         = 4      # sentinel token inserted at mutation positions
-MASK_COUNT         = 3      # max masks inserted per mutation step
-
-# TODO: understand contrastive search
-# Contrastive search parameters (from CovRL sample_config.json)
-MODEL_MAX_LENGTH   = 768    # model_max_length in config
-MASK_PROBABILITY   = 0.15   # fraction of tokens masked; sets max_length ceiling
-N_SAMPLES          = 32     # top_k for contrastive search
-PENALTY_ALPHA      = 0.6    # degeneration penalty for contrastive search
-
-# Directory where actor/critic checkpoints are written after each finetune cycle.
-# Override via environment variable or AFL_PYTHON_MODULE_XTRA (TODO: Stage 2).
-SAVE_DIR = "./covrl_checkpoints"
-
 
 # ---------------------------------------------------------------------------
 # Module-level state — all initialised in init()
 # ---------------------------------------------------------------------------
 
-# Set once in init()
-CONFIG        = None   # loaded config object  TODO:
-ACTOR         = None   # AutoModelForSeq2SeqLM (loaded in init)
-TOKENIZER     = None   # AutoTokenizer         (loaded in init)
-# TODO: change the way we provide UNKNOWN_TOKEN, we had to downgrade transformers because of this
-UNKNOWN_TOKEN = None   # TOKENIZER.unk_token_id (set in init after tokenizer loads)
-TRAINER       = None   # PPOTrainer (created in init, owns _finetune_cycle_index)
+CONFIG        = None   # Config (instantiated in init)
+ACTOR         = None   # AutoModelForSeq2SeqLM
+TOKENIZER     = None   # AutoTokenizer
+UNKNOWN_TOKEN = None   # TOKENIZER.unk_token_id
+TRAINER       = None   # PPOTrainer or GRPOTrainer
+
+# Derived from CONFIG in init() for use in hot paths (fuzz, _random_mask, etc.)
+MODEL_NAME        = None
+DEVICE            = None
+FINETUNE_INTERVAL = None
+FUZZ_COUNT        = None
+MASK_TOKEN        = None
+MASK_COUNT        = None
+MODEL_MAX_LENGTH  = None
+MASK_PROBABILITY  = None
+N_SAMPLES         = None
+PENALTY_ALPHA     = None
+SAMPLE_METHOD     = None
 
 # Updated in queue_get() / fuzz_count()
 _current_seed_token_ids  = None   # token ids from the most recent fuzz_count()
@@ -123,34 +105,63 @@ def init(seed):
     @type seed: int
     @param seed: A 32-bit random value
     """
-    # TODO: remove/make reason about reproducability random.seed(seed)
-
     global CONFIG, ACTOR, TOKENIZER, UNKNOWN_TOKEN, TRAINER
-    global _current_seed_token_ids
-    global _finetune_pending
+    global MODEL_NAME, DEVICE, FINETUNE_INTERVAL, FUZZ_COUNT
+    global MASK_TOKEN, MASK_COUNT, MODEL_MAX_LENGTH, MASK_PROBABILITY
+    global N_SAMPLES, PENALTY_ALPHA, SAMPLE_METHOD
+    global _current_seed_token_ids, _finetune_pending
+
+    CONFIG = _RUN_CONFIG
+
+    # Unpack into module-level names used by hot-path helpers
+    MODEL_NAME        = CONFIG.model_name
+    DEVICE            = CONFIG.device
+    FINETUNE_INTERVAL = CONFIG.afl.finetune_interval
+    FUZZ_COUNT        = CONFIG.afl.fuzz_count
+    MASK_TOKEN        = CONFIG.mask_token
+    MASK_COUNT        = CONFIG.afl.mask_count
+    MODEL_MAX_LENGTH  = CONFIG.model_max_length
+    MASK_PROBABILITY  = CONFIG.mask_probability
+    N_SAMPLES         = CONFIG.n_samples
+    PENALTY_ALPHA     = CONFIG.penalty_alpha
+    SAMPLE_METHOD     = CONFIG.sample_method
 
     TOKENIZER     = AutoTokenizer.from_pretrained(MODEL_NAME)
     ACTOR         = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME).to(DEVICE)
     UNKNOWN_TOKEN = TOKENIZER.unk_token_id
     ACTOR.eval()
 
-    # TODO: depricated in newest import transformers way of doing MASK_TOKEN
     assert TOKENIZER.mask_token_id == MASK_TOKEN, (
-        f"TOKENIZER.mask_token_id={TOKENIZER.mask_token_id} does not match "
-        f"MASK_TOKEN={MASK_TOKEN}; update the MASK_TOKEN constant to match"
+        f"TOKENIZER.mask_token_id={TOKENIZER.mask_token_id} != MASK_TOKEN={MASK_TOKEN}; "
+        f"update Config.mask_token to match"
     )
 
-    # TODO: load CONFIG; derive SAVE_DIR from env / AFL_PYTHON_MODULE_XTRA
-    TRAINER = PPOTrainer(
-        actor=ACTOR,
-        tokenizer=TOKENIZER,
-        device=DEVICE,
-        save_dir=SAVE_DIR,
-        n_showmap_workers=8,
-    )
+    if CONFIG.covrl is not None:
+        TRAINER = PPOTrainer(
+            actor=ACTOR,
+            tokenizer=TOKENIZER,
+            device=DEVICE,
+            save_dir=CONFIG.afl.save_dir,
+            train_batch_size=CONFIG.covrl.train_batch_size,
+            learning_rate=CONFIG.covrl.learning_rate,
+            mask_probability=MASK_PROBABILITY,
+            n_showmap_workers=CONFIG.afl.n_showmap_workers,
+        )
+    else:
+        TRAINER = GRPOTrainer(
+            actor=ACTOR,
+            tokenizer=TOKENIZER,
+            device=DEVICE,
+            save_dir=CONFIG.afl.save_dir,
+            train_batch_size=CONFIG.grpo.train_batch_size,
+            learning_rate=CONFIG.grpo.learning_rate,
+            mask_probability=MASK_PROBABILITY,
+            n_showmap_workers=CONFIG.afl.n_showmap_workers,
+            group_size=CONFIG.grpo.group_size,
+        )
 
-    _current_seed_token_ids  = None
-    _finetune_pending        = False
+    _current_seed_token_ids = None
+    _finetune_pending       = False
 
 
 def deinit():
@@ -259,7 +270,7 @@ def fuzz(buf, add_buf, max_size):
     if len(masked) <= 3:
         return buf
 
-    infilled_ids = _actor_infill(masked)
+    infilled_ids = _actor_infill(masked, sample_method=SAMPLE_METHOD)
 
     out_buf = _encode(infilled_ids)
 
@@ -471,6 +482,3 @@ def _reload_actor():
 # Helper methods
 # ---------------------------------------------------------------------------
 
-def load_config():
-    # TODO (Stage 2): load from env var path or AFL_PYTHON_MODULE_XTRA argument
-    return config

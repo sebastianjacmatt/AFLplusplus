@@ -164,7 +164,7 @@ class PPOTrainer(Trainer):
         """
         Prepare one finetune cycle's training data.
 
-        The rewarder loads the queue and computes rewards internally.
+        The rewarder loads the queue and computes rewards.
         This method handles orig-corpus mixing only.
 
         Mutations and orig are mixed 4:1 into one shared dataset consumed
