@@ -146,6 +146,7 @@ def init(seed):
         tokenizer=TOKENIZER,
         device=DEVICE,
         save_dir=SAVE_DIR,
+        n_showmap_workers=8,
     )
 
     _current_seed_token_ids  = None

@@ -35,7 +35,7 @@ from transformers import Trainer as HFTrainer
 from abstract_trainer import Trainer
 from covrl.critic import CriticModel, CriticDataset, CriticDataCollator
 from covrl.actor  import ActorDataset, ActorDataCollator, ActorTrainer
-from utils.data_utils import load_orig_corpus, load_mutation_corpus
+from utils.data_utils import load_orig_corpus
 from utils.rewarding  import Rewarder
 
 
@@ -162,59 +162,30 @@ class PPOTrainer(Trainer):
 
     def _prepare_data(self):
         """
-        Single shared preprocessing step for one finetune cycle.
+        Prepare one finetune cycle's training data.
 
-        Reads the current AFL++ queue via data_utils and performs reward
-        computation and corpus mixing.  Both _make_critic_dataset and
-        _make_actor_dataset consume the returned DataFrames without any
-        further data loading.
+        The rewarder loads the queue and computes rewards internally.
+        This method handles orig-corpus mixing only.
 
-        Steps:
-          1. Load all non-orig queue entries (coverage-increasing mutations).
-          2. Compute rewards via self._rewarder (afl-showmap + IDF).
-             TODO: remove this or at least raise rewards, as this should not really be possible: Falls back to reward=0.0 when self._rewarder is None.
-          3. Load orig: queue entries as the clean reference corpus.
-          4. Build one shared mixed dataset for both training paths:
-               mutations + orig sampled at 4:1 relative to len(mutations).
-          5. Return the mixed dataset as both prepared_critic_df and
-             prepared_actor_df.
+        Mutations and orig are mixed 4:1 into one shared dataset consumed
+        by both the critic and actor training paths. Orig entries receive
+        reward=0.0 — immaterial to the actor (critic derives r(W*) dynamically)
+        and provides CE anti-forgetting signal for the critic.
 
-        Both training paths receive the same mixed dataset, mirroring CovRL's
-        FineTuner.preprocess() which builds a single self.dataset consumed by
-        both train_critic() and finetune_actor().
-
-        TODO: I don't belive covrl does this.
-        Orig entries in the mixed dataset receive reward=0.0.  For the actor
-        this has no effect: ActorTrainer.compute_loss derives r(W*) from the
-        frozen critic dynamically.  For the critic, orig entries train toward
-        label 4 (score_to_label(0.0)) and contribute CE anti-forgetting signal.
-
-        @rtype:  tuple[pd.DataFrame, pd.DataFrame]
-        @return: (prepared_critic_df, prepared_actor_df) — same object both slots
+        @return: (prepared_critic_df, prepared_actor_df) — same object both slots.
         """
-        # Step 1 — load all coverage-increasing (non-orig) queue entries
-        mutations = load_mutation_corpus()
-        log.info("[prepare_data] loaded %d mutations", len(mutations))
+        log.info("[prepare_data] computing rewards via afl-showmap...")
+        mutations = self._rewarder.compute()
+        log.info("[prepare_data] %d mutations with rewards", len(mutations))
 
-        if not mutations.empty:
-            # Step 2 — compute rewards
-            if self._rewarder is not None:
-                log.info("[prepare_data] computing rewards via afl-showmap...")
-                mutations = self._rewarder.compute(mutations)
-                log.info("[prepare_data] rewards done")
-            else:
-                raise Exception("No rewards in current mutations")
-                #mutations["reward"] = 0.0
+        if mutations.empty:
+            raise Exception("afl queue contains no mutation entries before finetuning")
 
-        # Step 3 — load orig entries as clean reference corpus
         orig_corpus = load_orig_corpus()
-
-        # Steps 4-5 — build one shared mixed dataset for both training paths
-        n_mutations = len(mutations)
-        if not orig_corpus.empty and n_mutations > 0:
-            n_orig       = min(n_mutations * 4, len(orig_corpus))
+        if not orig_corpus.empty:
+            n_orig       = min(len(mutations) * 4, len(orig_corpus))
             sampled_orig = orig_corpus.sample(n=n_orig, ignore_index=True)
-            sampled_orig["reward"] = 0.0 # TODO: check that this is correct with covrl
+            sampled_orig["reward"] = 0.0
             mixed_df = pd.concat([mutations, sampled_orig], ignore_index=True)
         else:
             mixed_df = mutations
