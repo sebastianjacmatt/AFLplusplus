@@ -60,7 +60,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-from run_config    import CONFIG as _RUN_CONFIG
+from config.config import CONFIG as _RUN_CONFIG
 from covrl.trainer import PPOTrainer
 from grpo.trainer  import GRPOTrainer
 from utils.data_utils import set_queue_dir
