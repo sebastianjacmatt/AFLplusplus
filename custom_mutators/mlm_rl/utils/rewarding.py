@@ -183,7 +183,7 @@ class Rewarder:
         self._map_size_pow2 = math.sqrt(config.afl.bitmap_size)
         self._n_workers     = config.afl.n_showmap_workers
 
-        self._idf_vector     = np.zeros(bitmap_size, dtype=float)
+        self._idf_vector     = np.zeros(self._bitmap_size, dtype=float)
         self._bitmap_history = []
         self._total_seen     = 0
 
