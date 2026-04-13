@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from utils.data_utils import load_mutation_corpus
+from utils.data_utils import load_mutation_corpus, load_orig_corpus
 
 log = logging.getLogger(__name__)
 
@@ -159,12 +159,10 @@ class Rewarder:
     Override _compute_valid_rewards() to change the reward strategy (e.g. GRPO).
     """
 
-    def __init__(self, tmp_dir, bitmap_size=131072, idf_alpha=0.6, n_workers=1):
+    def __init__(self, config):
         """
-        @param tmp_dir:     Directory for temporary showmap input/output files.
-        @param bitmap_size: AFL++ coverage map size (default 2^17 = 131072).
-        @param idf_alpha:   EMA smoothing factor for IDF update (CovRL: 0.6).
-        @param n_workers:   Number of parallel showmap threads (ThreadPoolExecutor).
+        @param config: Top-level Config; reads config.afl for AFL++ settings and
+                       config.covrl for reward computation parameters.
         """
         self._afl_showmap_path = os.path.normpath(
             os.path.join(os.path.dirname(__file__), "../../../afl-showmap")
@@ -179,11 +177,11 @@ class Rewarder:
             raise FileNotFoundError(f"interpreter not found: {self._interpreter_path}")
 
         self._error_map     = _ERROR_MAPS.get("jerry", {})  # TODO: from config
-        self._tmp_dir       = tmp_dir
-        self._bitmap_size   = bitmap_size
-        self._idf_alpha     = idf_alpha
-        self._map_size_pow2 = math.sqrt(bitmap_size)
-        self._n_workers     = n_workers
+        self._tmp_dir       = os.path.join(config.afl.save_dir, "tmp")
+        self._bitmap_size   = config.afl.bitmap_size
+        self._idf_alpha     = config.covrl.idf_alpha
+        self._map_size_pow2 = math.sqrt(config.afl.bitmap_size)
+        self._n_workers     = config.afl.n_showmap_workers
 
         self._idf_vector     = np.zeros(bitmap_size, dtype=float)
         self._bitmap_history = []
@@ -198,11 +196,14 @@ class Rewarder:
     def compute(self):
         """
         Load the current AFL++ mutation queue, process new entries, and return
-        all rewarded mutations seen so far.
+        the training-ready mixed dataset.
 
         New entries (file_ids not yet in self._dataset) are run through
         afl-showmap in parallel, IDF is updated from the full bitmap history,
         and rewards are assigned. Already-processed entries are not rerun.
+
+        The returned DataFrame mixes mutations with a 4:1 sample of the orig
+        corpus (reward=0.0 on orig rows for critic anti-forgetting).
 
         @return: DataFrame with columns ["file_id", "data", "group_id", "reward"].
         """
@@ -225,7 +226,7 @@ class Rewarder:
         unprocessed = self._dataset[~self._dataset["is_proc"].astype(bool)]
         if unprocessed.empty:
             log.info("[rewarder] no new entries to process")
-            return self._dataset[["file_id", "data", "group_id", "reward"]].copy()
+            return self._mix_orig(self._dataset[["file_id", "data", "group_id", "reward"]].copy())
 
         worker_args = [
             (
@@ -264,7 +265,25 @@ class Rewarder:
             self._dataset.at[idx, "bitmap"]  = r["bitmap"]
             self._dataset.at[idx, "reward"]  = r["reward"]
 
-        return self._dataset[["file_id", "data", "group_id", "reward"]].copy()
+        return self._mix_orig(self._dataset[["file_id", "data", "group_id", "reward"]].copy())
+
+    def _mix_orig(self, mutations):
+        """
+        Mix mutations with a 4:1 sample of the orig corpus.
+
+        Orig entries receive reward=0.0 — provides CE anti-forgetting signal
+        for the critic; immaterial to the actor PPO objective.
+
+        @param mutations: DataFrame of rewarded mutations.
+        @return:          Mixed DataFrame, or mutations unchanged if orig is empty.
+        """
+        orig_corpus = load_orig_corpus()
+        if orig_corpus.empty:
+            return mutations
+        n_orig       = min(len(mutations) * 4, len(orig_corpus))
+        sampled_orig = orig_corpus.sample(n=n_orig, ignore_index=True)
+        sampled_orig["reward"] = 0.0
+        return pd.concat([mutations, sampled_orig], ignore_index=True)
 
     def _update_idf(self):
         """Recompute IDF from the full accumulated bitmap history (CovRL Eq. 5)."""

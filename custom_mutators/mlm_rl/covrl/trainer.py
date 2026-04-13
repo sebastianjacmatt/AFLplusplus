@@ -13,95 +13,58 @@ Cycle semantics:
   cycle N>0 — critic update then actor PPO update using critic as baseline.
 
 Data flow per cycle:
-  _prepare_data()
-      └─ returns (prepared_critic_df, prepared_actor_df)
-            ├─ _make_critic_dataset(prepared_critic_df) → CriticDataset
-            └─ _make_actor_dataset(prepared_actor_df)   → ActorDataset
+  Rewarder.compute()
+      └─ returns mixed DataFrame (mutations + sampled orig at 4:1)
+            ├─ _make_critic_dataset(mixed_df) → CriticDataset
+            └─ _make_actor_dataset(mixed_df)  → ActorDataset
 
-All queue loading, reward computation, and corpus mixing live exclusively in
-_prepare_data.  The dataset builders are pure structural wrappers over
-already-prepared DataFrames.
+All queue loading, reward computation, and corpus mixing live in Rewarder.
+The dataset builders are pure structural wrappers over already-prepared DataFrames.
 """
 import copy
 import logging
 import os
 
-import pandas as pd
-
 log = logging.getLogger(__name__)
-from transformers import TrainingArguments
+from transformers import AutoTokenizer, TrainingArguments
 from transformers import Trainer as HFTrainer
 
 from abstract_trainer import Trainer
 from covrl.critic import CriticModel, CriticDataset, CriticDataCollator
 from covrl.actor  import ActorDataset, ActorDataCollator, ActorTrainer
-from utils.data_utils import load_orig_corpus
 from utils.rewarding  import Rewarder
 
 
 class PPOTrainer(Trainer):
 
-    def __init__(
-        self,
-        actor,
-        tokenizer,
-        device,
-        save_dir="./covrl_checkpoints",
-        train_batch_size=4,
-        learning_rate=2e-5,
-        mask_probability=0.15,
-        n_showmap_workers=8,
-    ):
+    def __init__(self, actor, config):
         """
-        @type  actor:              transformers.AutoModelForSeq2SeqLM
-        @param actor:              Pre-loaded actor model from mlm_rl.py init().
+        @type  actor:   transformers.AutoModelForSeq2SeqLM
+        @param actor:   Pre-loaded actor model from mlm_rl.py init().
 
-        @type  tokenizer:          transformers.AutoTokenizer
-        @param tokenizer:          Tokenizer shared with mlm_rl.py.
-
-        @type  device:             str
-        @param device:             "cuda" or "cpu", passed from DEVICE in mlm_rl.py.
-
-        @type  save_dir:           str
-        @param save_dir:           Root directory for actor/critic checkpoints.
-
-        @type  train_batch_size:   int
-        @param train_batch_size:   Per-device batch size for critic and actor training.
-
-        @type  learning_rate:      float
-        @param learning_rate:      Learning rate for critic and actor training.
-
-        @type  mask_probability:   float
-        @param mask_probability:   Fraction of tokens masked per span.
-                                   Should match mlm_rl.py MASK_PROBABILITY.
-
-        @type  n_showmap_workers:  int
-        @param n_showmap_workers:  Number of parallel afl-showmap threads.  AFL++
-                                   occupies one core; the remaining cores are free
-                                   for showmap.  Uses ThreadPoolExecutor — subprocess.run
-                                   releases the GIL during os.waitpid so threads achieve
-                                   true parallelism with zero process-spawn overhead.
-
+        @type  config:  config.config.Config
+        @param config:  Top-level run config; all hyperparameters and paths are
+                        read from here (config.covrl, config.afl, config.device).
         """
         self.actor     = actor
-        self.tokenizer = tokenizer
-        self.device    = device
-        self.save_dir  = save_dir
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+        self.device    = config.device
+        self.save_dir  = config.afl.save_dir
         os.makedirs(self.save_dir, exist_ok=True)
 
         self._finetune_cycle_index = 0
         self.critic          = None
         self._previous_actor = None
-        self._mask_probability = mask_probability
+        self._mask_probability = config.mask_probability
 
         # HuggingFace TrainingArguments shared by critic and actor training.
         # Checkpoint saving is handled explicitly; HF auto-save is disabled.
         self._training_args = TrainingArguments(
-            output_dir=os.path.join(save_dir, "hf_output"),
+            output_dir=os.path.join(config.afl.save_dir, "hf_output"),
             overwrite_output_dir=True,
-            per_device_train_batch_size=train_batch_size,
+            per_device_train_batch_size=config.covrl.train_batch_size,
             fp16=False,
-            learning_rate=learning_rate,
+            learning_rate=config.covrl.learning_rate,
             eval_strategy="no",
             save_strategy="no",
             load_best_model_at_end=False,
@@ -109,10 +72,7 @@ class PPOTrainer(Trainer):
             remove_unused_columns=False,
         )
 
-        self._rewarder = Rewarder(
-            tmp_dir=os.path.join(save_dir, "tmp"),
-            n_workers=n_showmap_workers,
-        )
+        self._rewarder = Rewarder(config=config)
 
     # -------------------------------------------------------------------------
     # Trainer interface
@@ -122,26 +82,25 @@ class PPOTrainer(Trainer):
         """
         Run one staged CovRL finetuning cycle over the current AFL++ queue.
 
-        Data preparation runs once via _prepare_data; the resulting DataFrames
-        are handed directly to _make_critic_dataset and _make_actor_dataset so
-        that queue loading, reward computation, and corpus mixing are never
-        duplicated between the two training paths.
+        Rewarder.compute() handles queue loading, reward computation, and
+        orig-corpus mixing; the returned DataFrame is passed directly to the
+        critic and actor dataset builders.
         """
         log.info("[finetune] cycle %d — preparing data", self._finetune_cycle_index)
-        prepared_critic_df, prepared_actor_df = self._prepare_data()
+        mixed_df = self._rewarder.compute()
 
-        if prepared_critic_df.empty:
+        if mixed_df.empty:
             raise Exception("afl queue contains no mutation entries before finetuning")
 
-        log.info("[finetune] training critic on %d rows", len(prepared_critic_df))
-        critic_dataset = self._make_critic_dataset(prepared_critic_df)
+        log.info("[finetune] training critic on %d rows", len(mixed_df))
+        critic_dataset = self._make_critic_dataset(mixed_df)
         self._train_critic(critic_dataset)
         log.info("[finetune] critic done")
 
         if self._finetune_cycle_index > 0:
             self._snapshot_actor()
-            log.info("[finetune] finetuning actor on %d rows", len(prepared_actor_df))
-            actor_dataset = self._make_actor_dataset(prepared_actor_df)
+            log.info("[finetune] finetuning actor on %d rows", len(mixed_df))
+            actor_dataset = self._make_actor_dataset(mixed_df)
             self._finetune_actor_with_ppo_like_loss(
                 actor_dataset=actor_dataset,
                 critic=self.critic,
@@ -155,42 +114,6 @@ class PPOTrainer(Trainer):
     def get_actor(self):
         """Return the current actor model for hot-swap in mlm_rl.py."""
         return self.actor
-
-    # -------------------------------------------------------------------------
-    # Shared data preparation
-    # -------------------------------------------------------------------------
-
-    def _prepare_data(self):
-        """
-        Prepare one finetune cycle's training data.
-
-        The rewarder loads the queue and computes rewards.
-        This method handles orig-corpus mixing only.
-
-        Mutations and orig are mixed 4:1 into one shared dataset consumed
-        by both the critic and actor training paths. Orig entries receive
-        reward=0.0 — immaterial to the actor (critic derives r(W*) dynamically)
-        and provides CE anti-forgetting signal for the critic.
-
-        @return: (prepared_critic_df, prepared_actor_df) — same object both slots.
-        """
-        log.info("[prepare_data] computing rewards via afl-showmap...")
-        mutations = self._rewarder.compute()
-        log.info("[prepare_data] %d mutations with rewards", len(mutations))
-
-        if mutations.empty:
-            raise Exception("afl queue contains no mutation entries before finetuning")
-
-        orig_corpus = load_orig_corpus()
-        if not orig_corpus.empty:
-            n_orig       = min(len(mutations) * 4, len(orig_corpus))
-            sampled_orig = orig_corpus.sample(n=n_orig, ignore_index=True)
-            sampled_orig["reward"] = 0.0
-            mixed_df = pd.concat([mutations, sampled_orig], ignore_index=True)
-        else:
-            mixed_df = mutations
-
-        return mixed_df, mixed_df
 
     # -------------------------------------------------------------------------
     # Critic
@@ -315,19 +238,3 @@ class PPOTrainer(Trainer):
         actor_path = os.path.join(self.save_dir, "actor_final")
         self.actor.save_pretrained(actor_path)
         self.tokenizer.save_pretrained(actor_path)
-
-    # -------------------------------------------------------------------------
-    # Checkpoints
-    # -------------------------------------------------------------------------
-
-    def save_checkpoint(self, save_dir):
-        pass
-
-    def load_checkpoint(self, save_dir):
-        pass
-
-    def _get_latest_actor_checkpoint(self):
-        pass
-
-    def _get_latest_critic_checkpoint(self):
-        pass

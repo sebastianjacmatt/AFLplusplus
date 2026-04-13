@@ -13,19 +13,17 @@ class GRPOTrainer(Trainer):
     TODO: implement.
     """
 
-    def __init__(
-        self,
-        actor,
-        tokenizer,
-        device,
-        save_dir="./covrl_checkpoints",
-        train_batch_size=4,
-        learning_rate=2e-5,
-        mask_probability=0.15,
-        n_showmap_workers=8,
-        group_size=8,
-    ):
+    def __init__(self, actor, config):
         raise NotImplementedError("GRPOTrainer is not yet implemented")
+
+    def _prepare_data():
+        pass
+
+    def _train_grpo():
+        pass
+
+    def _grpo_loss():
+        pass
 
     def finetune(self):
         raise NotImplementedError

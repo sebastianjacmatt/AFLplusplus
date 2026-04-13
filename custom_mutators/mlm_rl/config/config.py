@@ -3,7 +3,31 @@ from typing import List, Optional
 
 import torch
 
-from config.config_afl import AFLConfig
+
+# ---------------------------------------------------------------------------
+# AFL-side config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AFLConfig:
+    # Seeds processed between each finetune trigger (CovRL SYNC_INTERVAL=100).
+    finetune_interval: int = 2
+
+    # Mutation budget returned by fuzz_count() per seed.
+    fuzz_count: int = 32
+
+    # Max mask tokens inserted or overwritten per mutation step.
+    mask_count: int = 3
+
+    # Root directory for actor/critic checkpoints and showmap tmp files.
+    save_dir: str = "./covrl_checkpoints"
+
+    # Parallel afl-showmap threads (ThreadPoolExecutor). subprocess.run releases
+    # the GIL during os.waitpid so threads achieve true parallelism.
+    n_showmap_workers: int = 8
+
+    # AFL++ coverage map size (2^17 = 131072).
+    bitmap_size: int = 131072
 
 
 # ---------------------------------------------------------------------------
@@ -14,6 +38,7 @@ from config.config_afl import AFLConfig
 class CovRLConfig:
     train_batch_size: int  = 4
     learning_rate:  float  = 2e-5
+    idf_alpha:      float  = 0.6     # EMA smoothing factor for IDF update (CovRL Eq. 5)
 
 
 @dataclass
@@ -79,10 +104,12 @@ CONFIG = Config(
         mask_count=3,
         save_dir="./covrl_checkpoints",
         n_showmap_workers=8,
+        bitmap_size=131072,
     ),
     covrl=CovRLConfig(
         train_batch_size=4,
         learning_rate=2e-5,
+        idf_alpha=0.6,
     ),
     # To switch to GRPO: set covrl=None and uncomment below
     # covrl=None,

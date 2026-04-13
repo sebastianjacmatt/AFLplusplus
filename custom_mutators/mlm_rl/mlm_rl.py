@@ -137,28 +137,9 @@ def init(seed):
     )
 
     if CONFIG.covrl is not None:
-        TRAINER = PPOTrainer(
-            actor=ACTOR,
-            tokenizer=TOKENIZER,
-            device=DEVICE,
-            save_dir=CONFIG.afl.save_dir,
-            train_batch_size=CONFIG.covrl.train_batch_size,
-            learning_rate=CONFIG.covrl.learning_rate,
-            mask_probability=MASK_PROBABILITY,
-            n_showmap_workers=CONFIG.afl.n_showmap_workers,
-        )
+        TRAINER = PPOTrainer(actor=ACTOR, config=CONFIG)
     else:
-        TRAINER = GRPOTrainer(
-            actor=ACTOR,
-            tokenizer=TOKENIZER,
-            device=DEVICE,
-            save_dir=CONFIG.afl.save_dir,
-            train_batch_size=CONFIG.grpo.train_batch_size,
-            learning_rate=CONFIG.grpo.learning_rate,
-            mask_probability=MASK_PROBABILITY,
-            n_showmap_workers=CONFIG.afl.n_showmap_workers,
-            group_size=CONFIG.grpo.group_size,
-        )
+        TRAINER = GRPOTrainer(actor=ACTOR, config=CONFIG)
 
     _current_seed_token_ids = None
     _finetune_pending       = False
