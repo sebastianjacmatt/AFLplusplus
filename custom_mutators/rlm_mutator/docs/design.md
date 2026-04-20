@@ -194,4 +194,313 @@ giving us a final scalar reward $r_t$ appended to the dataframe after each execu
 
 ## Finetuning
 
-Finetuning is initiated by the queue_
+We now describe the policy update applied to the collected rollout dataset
+$$
+D_t = \{(x_i, y_i, \log \pi_{\theta_{\mathrm{old}}}(y_i \mid x_i), r_i)\}_{i=1}^{|D_t|},
+$$
+
+
+where each sample consists of a masked input $x_i$, a sampled infill $y_i$, the behaviour policy log-probability under the previous actor $\pi_{\theta_{\mathrm{old}}}$, and the scalar reward $r_i$ obtained after execution.
+
+The goal of finetuning is to update the mutator policy $\pi_\theta(y \mid x)$ so that it assigns higher probability to infills that yield higher reward, while preventing excessively large policy updates. We consider two alternatives: Proximal Policy Optimization PPO and Group Relative Policy Optimization GRPO.
+
+### PPO
+
+PPO updates the actor using importance sampling with clipping. For each sample $i$, define the probability ratio
+$$
+r_t(\theta) = \frac{\pi_\theta(y_i \mid x_i)}{\pi_{\theta_{\mathrm{old}}}(y_i \mid x_i)}.
+$$
+
+Let $\hat{A}_i$ denote the advantage estimate for sample $i$. In PPO, this is typically obtained from a critic or value function $V_\psi$, for example through
+$$
+\hat{A}_i = r_i - V_\psi(x_i),
+$$
+or through a more general return-minus-baseline estimator if multi-step returns are used.
+
+The clipped PPO objective is then
+$$
+J_{\mathrm{PPO}}(\theta)
+=
+\mathbb{E}_{(x_i,y_i)\sim D_t}
+\left[
+\min
+\left(
+r_i(\theta)\hat{A}_i,\,
+\mathrm{clip}\!\left(r_i(\theta), 1-\epsilon, 1+\epsilon\right)\hat{A}_i
+\right)
+\right].
+$$
+
+The clipping parameter $\epsilon > 0$ prevents the new policy from moving too far from the behaviour policy that generated the data. In practice, the actor is updated by maximizing $J_{\mathrm{PPO}}(\theta)$ over several minibatch epochs.
+
+If KL regularization against a frozen reference model $\pi_{\mathrm{ref}}$ is used, we instead optimize
+$$
+J_{\mathrm{PPO\text{-}KL}}(\theta)
+=
+\mathbb{E}_{(x_i,y_i)\sim D_t}
+\left[
+\min
+\left(
+\rho_i(\theta)\hat{A}_i,\,
+\mathrm{clip}\!\left(\rho_i(\theta), 1-\epsilon, 1+\epsilon\right)\hat{A}_i
+\right)
+-
+\beta\, D_{\mathrm{KL}}\!\left(\pi_\theta(\cdot\mid x_i)\,\|\,\pi_{\mathrm{ref}}(\cdot\mid x_i)\right)
+\right],
+$$
+where $\beta \ge 0$ controls the strength of the KL penalty.
+
+Methodologically, PPO fits naturally when each rollout sample is treated independently. The grouping structure used during mutation is then ignored during optimization, and the policy is updated directly from the per-sample rewards and critic-derived advantages.
+
+### GRPO
+
+GRPO removes the critic and instead computes a relative baseline from rewards within each group. This is particularly natural in our setting because one masked state $x$ is reused for multiple sampled infills inside each group.
+
+Let a group $g$ contain $G$ sampled infills
+$$
+\{(x_g, y_{g,1}, r_{g,1}), \dots, (x_g, y_{g,G}, r_{g,G})\},
+$$
+where all samples in the group share the same masked input $x_g$ and differ only in the sampled infill.
+
+For each sample in the group, define the policy ratio
+$$
+r_{g,j}(\theta) = \frac{\pi_\theta(y_{g,j} \mid x_g)}{\pi_{\theta_{\mathrm{old}}}(y_{g,j} \mid x_g)}.
+$$
+
+Instead of using a critic, GRPO computes a group-relative advantage. A simple form is
+$$
+\hat{A}_{g,j}
+=
+r_{g,j} - \frac{1}{G}\sum_{k=1}^{G} r_{g,k},
+$$
+and a normalized version is
+$$
+\hat{A}_{g,j}
+=
+\frac{r_{g,j} - \mathrm{mean}(r_g)}
+{\mathrm{std}(r_g) + \delta},
+$$
+where $\delta > 0$ is a small constant for numerical stability.
+
+The clipped GRPO objective is
+$$
+J_{\mathrm{GRPO}}(\theta)
+=
+\mathbb{E}_{g}
+\left[
+\frac{1}{G}\sum_{j=1}^{G}
+\min
+\left(
+r_{g,j}(\theta)\hat{A}_{g,j},\,
+\mathrm{clip}\!\left(\rho_{g,j}(\theta), 1-\epsilon, 1+\epsilon\right)\hat{A}_{g,j}
+\right)
+\right].
+$$
+
+If KL regularization is used, the objective becomes
+$$
+J_{\mathrm{GRPO\text{-}KL}}(\theta)
+=
+\mathbb{E}_{g}
+\left[
+\frac{1}{G}\sum_{j=1}^{G}
+\left(
+\min
+\left(
+\rho_{g,j}(\theta)\hat{A}_{g,j},\,
+\mathrm{clip}\!\left(\rho_{g,j}(\theta), 1-\epsilon, 1+\epsilon\right)\hat{A}_{g,j}
+\right)
+-
+\beta\, D_{\mathrm{KL}}\!\left(\pi_\theta(\cdot\mid x_g)\,\|\,\pi_{\mathrm{ref}}(\cdot\mid x_g)\right)
+\right)
+\right].
+$$
+
+Methodologically, GRPO is well aligned with our grouped mutation process. Each group corresponds to repeated infilling of the same masked state $x_g$, so the reward signal becomes comparative: samples are not judged only by their absolute reward, but by whether they outperform other candidate infills for the same state.
+
+### KL
+We follow in the steps of grpo (ref;grpo) and retain a reference policy $\pi_{\theta_{ref}}$ updated at a certain finetuning interval. We add on KL divergence 
+$$
+-
+\beta\, D_{\mathrm{KL}}\!\left(\pi_\theta(\cdot\mid x)\,\|\,\pi_{\mathrm{ref}}(\cdot\mid x)\right)
+$$
+
+PPO and GRPO propose this as an additinal regularization method on policy gradients(ref;ppo,grpo), although the notion of $\pi_{ref}$ periodically updated is specifically taken from GRPO (ref;grpo)
+
+### LoRA
+
+To reduce the memory and optimization cost of policy finetuning, we parameterize the actor update using Low-Rank Adaptation LoRA rather than full dense finetuning. In LoRA, the pretrained weight matrices of the base model are frozen, and only a low-rank update is trained. For a pretrained weight matrix
+$$
+W_0 \in \mathbb{R}^{d \times k},
+$$
+LoRA replaces the full update
+$$
+W = W_0 + \Delta W
+$$
+with a low-rank factorization
+$$
+\Delta W = BA,
+$$
+where
+$$
+B \in \mathbb{R}^{d \times r}, \qquad
+A \in \mathbb{R}^{r \times k}, \qquad
+r \ll \min(d,k).
+$$
+Thus the adapted layer is
+$$
+W = W_0 + BA.
+$$
+Equivalently, for an input activation $h$, the modified forward pass is
+$$
+Wh = W_0 h + BAh.
+$$
+Only the adapter parameters $A$ and $B$ are trained, while the pretrained parameters in $W_0$ remain fixed. This is the central idea of LoRA and is motivated by the observation that downstream adaptation updates often lie in a low-rank subspace.(ref;LoRA)
+
+Following the LoRA parameterization, the trainable policy parameters are no longer the full dense Transformer weights. Instead, if $\theta_0$ denotes the frozen pretrained policy parameters and $\phi$ denotes the collection of LoRA parameters across all adapted layers, then the policy is
+$$
+\pi_{\theta}(y \mid x)
+\equiv
+\pi_{\theta_0,\phi}(y \mid x),
+$$
+with
+$$
+\theta = \theta_0 + \Delta\theta(\phi),
+$$
+where $\Delta\theta(\phi)$ is induced only through the low-rank matrices $A$ and $B$. Hence, RL finetuning with PPO or GRPO updates only $\phi$, not the full parameter set $\theta_0$.
+
+In the Transformer architecture, LoRA can in principle be applied to any dense projection matrix. In practice, it is most commonly attached to the self-attention projections, for example
+$$
+W_q,\; W_k,\; W_v,\; W_o,
+$$
+and often only a subset of these is adapted. The original LoRA paper studies this design explicitly and reports strong performance when adapting attention projections while freezing the rest of the network.(ref;LoRA)
+
+Therefore, if an adapted attention projection is originally
+$$
+W_q \in \mathbb{R}^{d_{\mathrm{model}} \times d_{\mathrm{model}}},
+$$
+we instead use
+$$
+W_q = W_{q,0} + B_q A_q,
+$$
+and analogously for other selected projections such as $W_v$. The Hugging Face PEFT implementation provides this mechanism directly by wrapping the chosen linear layers with LoRA modules.
+
+The main benefit in our setting is that PPO or GRPO only needs to optimize the LoRA parameters
+$$
+\phi = \{A_\ell, B_\ell\}_{\ell \in \mathcal{L}},
+$$
+for the chosen set of adapted layers $\mathcal{L}$. Since
+$$
+|\phi| \ll |\theta_0|,
+$$
+this substantially reduces optimizer state, gradient memory, and checkpoint size during finetuning. 
+
+The RL update is performed over LoRA parameters only:
+$$
+\phi_{t+1}
+=
+\arg\max_{\phi} J_{\mathrm{PPO}}(\theta_0,\phi)
+\qquad \text{or} \qquad
+\phi_{t+1}
+=
+\arg\max_{\phi} J_{\mathrm{GRPO}}(\theta_0,\phi),
+$$
+depending on the selected finetuning algorithm, while the pretrained base parameters $\theta_0$ remain frozen throughout.
+
+LoRA may also preserves the original pretrained model as a fixed base policy, which is desirable when we want to maintain the model's general infilling ability while steering it toward higher-reward fuzzing mutations. (ref;LoRA)
+For both PPO and GRPO we evaluate LoRA's effect on catastrophic forgetting by observing model infilling ability(in practice error rate $\bar{e_t}$). 
+
+### Specific implementation details
+
+We describe some specific psudocode classes and methods needed for specifically finetuning ability. We have a general Trainer class of which we overwrite the finetune() method for grpo and ppo algorithms.
+
+```py
+""" trainer.py is a general trainer for the mask infilling task, we expect grpo.py and ppo.py to implement their respective algorithms by overwriting finetune"""
+class Trainer:
+    def finetune(self, records: list[dict]) -> None:
+        """ interface for specific grpo/ppo finetuning, will be overwritten """
+        pass
+    def infill(self, masked_token_ids: list[int]) -> InfillResult:
+        """ main method used to infill in rlm.py """
+        pass
+    def ref_logprob(self, x_t: list[int], y_t: list[int]) -> float:
+        """ keeps the logprobs of the reference policy; needed for KL regularization """
+        pass
+    def kl_divergence(logprob,ref_logprob):
+        """ calculates the kl divergence between two policies """
+        pass
+    @staticmethod
+    def _wrap_lora(model, cfg):
+        """Apply LoRA adapters via peft """
+        pass
+
+
+class PPO:
+  def finetune():
+    pass
+
+  def _compute_loss():
+    ratio = log_prob / old_logprob
+    advantage = ppo_advantage()
+    
+    kl_divergence(log_prob, old_logprob) #alternativly we use ref_logprob,
+
+    loss = ratio*advantage-cfg.alpha*kl_divergence
+    return loss
+  
+  def _ppo_advantage():
+    """ PPO advantage using GAE """
+    pass
+
+class GRPO:
+  def finetune():
+    pass
+  def _compute_loss():
+    ratio = log_prob / old_logprob
+    advantage = grpo_advantage()
+    
+    kl_divergence(log_prob, old_logprob) #alternativly we use ref_logprob,
+
+    loss = ratio*advantage-cfg.alpha*kl_divergence
+    return loss
+  
+  def _grpo_advantage():
+    pass
+```
+
+
+
+## Ablation considerations, left as todo for later, do not attend to this
+
+We consider ablation studies on;
+- general
+- fuzz_count()
+- train_batch_size
+- learning rate
+- LoRA
+    - LoRA target modules
+    - rank $r$
+    - lora $\alpha$
+    - lora dropout
+- policy gradients (ppo/grpo)
+    - masking probability
+    - top_k + sampling methods
+    - finetune interval
+    - kl coefficient $\beta$
+    - clip $\epsilon$
+    - KL $\pi_{ref}$ interval
+    - different idf $\alpha$
+- ppo
+    - value_coef
+    - entropy_coef
+    - gea $\lambda$
+    - LoRA
+- grpo
+    - LoRA
+    - group_size
+    - norm $\epsilon$
+- different language models
+    - codet5p
+    - larger bert models
+
+
