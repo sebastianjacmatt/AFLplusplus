@@ -412,63 +412,113 @@ For both PPO and GRPO we evaluate LoRA's effect on catastrophic forgetting by ob
 
 ### Specific implementation details
 
-We describe some specific psudocode classes and methods needed for specifically finetuning ability. We have a general Trainer class of which we overwrite the finetune() method for grpo and ppo algorithms.
+`Trainer` owns the model. `Mutator` references the same model through the trainer via a @property. `Trainer` stores the model as `self.model`, manages the optimizer against it, and owns checkpointing. The model object persists across finetune cycles.
+
+`Mutator`'s responsibility is mutation — tokenize, mask, infill, encode. It accesses the live actor via `self.trainer.model`, calls `trainer.ref_logprob()` for KL computation, and calls `maybe_finetune()` to trigger a training cycle when the rollout buffer is ready.
 
 ```py
-""" trainer.py is a general trainer for the mask infilling task, we expect grpo.py and ppo.py to implement their respective algorithms by overwriting finetune"""
-class Trainer:
-    def finetune(self, records: list[dict]) -> None:
-        """ interface for specific grpo/ppo finetuning, will be overwritten """
-        pass
-    def infill(self, masked_token_ids: list[int]) -> InfillResult:
-        """ main method used to infill in rlm.py """
-        pass
-    def ref_logprob(self, x_t: list[int], y_t: list[int]) -> float:
-        """ keeps the logprobs of the reference policy; needed for KL regularization """
-        pass
-    def kl_divergence(logprob,ref_logprob):
-        """ calculates the kl divergence between two policies """
-        pass
-    @staticmethod
-    def _wrap_lora(model, cfg):
-        """Apply LoRA adapters via peft """
+class Mutator:
+    def __init__(self, trainer, tokenizer, buffer, cfg):
+        self.trainer   = trainer      # Trainer OWNS the model and reference snapshot
+        self.tokenizer = tokenizer
+        self.buffer    = buffer
+        self.cfg       = cfg
+
+    @property
+    def model(self):
+        return self.trainer.model     # read-only convenience accessor
+
+    def infill(self, x_t):
+        # generates y_t ~ pi_theta(. | x_t) using self.model.generate(...)
         pass
 
-
-class PPO:
-  def finetune():
-    pass
-
-  def _compute_loss():
-    ratio = log_prob / old_logprob
-    advantage = ppo_advantage()
-    
-    kl_divergence(log_prob, old_logprob) #alternativly we use ref_logprob,
-
-    loss = ratio*advantage-cfg.alpha*kl_divergence
-    return loss
-  
-  def _ppo_advantage():
-    """ PPO advantage using GAE """
-    pass
-
-class GRPO:
-  def finetune():
-    pass
-  def _compute_loss():
-    ratio = log_prob / old_logprob
-    advantage = grpo_advantage()
-    
-    kl_divergence(log_prob, old_logprob) #alternativly we use ref_logprob,
-
-    loss = ratio*advantage-cfg.alpha*kl_divergence
-    return loss
-  
-  def _grpo_advantage():
-    pass
+    def maybe_finetune(self):
+        records = self.buffer.flush()         # drain completed rollouts
+        self.trainer.set_rollout_dataset(records)
+        self.trainer.train()                  # HF Trainer.train() — rebuilds optimizer each call; Adam momentum does not persist across finetune cycles
+        self.trainer.snapshot_ref()           # re-anchor pi_ref after weights updated
 ```
 
+`BaseTrainer` subclasses `Trainer`, owns the model by construction. LoRA is applied conditionally inside `__init__` based on `cfg`. The model presents interface to all callers, so `snapshot_ref`, `ref_logprob`, and `compute_loss` require no LoRA-specifics. `compute_loss()` is the standard HF override point — PPO and GRPO each override it with their respective clipped-ratio objectives:
 
+```py
+class BaseTrainer(Trainer):
+    def __init__(self, model, args, data_collator, tokenizer, cfg, **kwargs):
+        # LoRA wrapping is fully encapsulated here. After get_peft_model(), the model
+        # presents an unchanged interface — callers never need to distinguish LoRA vs full.
+        if cfg.lora_r > 0:
+            lora_cfg = LoraConfig(
+                r              = cfg.lora_r,
+                lora_alpha     = cfg.lora_alpha,
+                lora_dropout   = cfg.lora_dropout,
+                target_modules = cfg.lora_target_modules_list,
+                task_type      = TaskType.SEQ_2_SEQ_LM,
+            )
+            model = get_peft_model(model, lora_cfg)
+        super().__init__(model=model, args=args, data_collator=data_collator, **kwargs)
+        self.tokenizer  = tokenizer
+        self.cfg        = cfg
+        self._ref_model = None
+        self.snapshot_ref()   # initialise reference to the pretrained weights before any training
+
+    def snapshot_ref(self):
+        if self._ref_model is None:
+            self._ref_model = copy.deepcopy(self.model)   # full copy once at init
+        elif self.cfg.lora_r > 0:
+            _copy_lora_weights(self.model, self._ref_model)   # update adapter weights only; base stays from init copy
+        else:
+            self._ref_model = copy.deepcopy(self.model)
+
+    def ref_logprob(self, x_t, y_t):
+        return self.sequence_logprob(self._ref_model, x_t, y_t)
+
+    def set_rollout_dataset(self, records):
+        self.train_dataset = RolloutDataset(records)
+
+    def sequence_logprob(self, model, x_t, y_t):
+        pass   # shared utility: log pi_theta(y_t | x_t) under given model
+
+    def kl_divergence(self, logprob, ref_logprob):
+        pass   # KL penalty term shared by both PPO-KL and GRPO-KL
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        raise NotImplementedError   # PPO and GRPO override this
+
+def _copy_lora_weights(src, dst):
+    # module-level helper; copies only lora_ keys from src into dst — O(|phi|) not O(|theta|)
+    dst.load_state_dict({k: v for k, v in src.state_dict().items() if "lora_" in k}, strict=False)
+
+class PPOTrainer(BaseTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        pass   # clipped PPO objective + optional KL penalty
+
+class GRPOTrainer(BaseTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        pass   # group-relative advantage + clipped ratio + optional KL penalty
+```
+
+#### LoRA integration
+
+LoRA wrapping happens once, inside `BaseTrainer.__init__`, immediately before handing `model` to HF `Trainer`. The `LoraConfig` is built entirely from `cfg` fields (`lora_r`, `lora_alpha`, `lora_dropout`, `lora_target_modules_list`), so no LoRA configuration escapes the trainer boundary. When `cfg.lora_r == 0` the wrapping is skipped and full fine-tuning proceeds instead.
+
+After `get_peft_model()`, the base weights are frozen and only the adapter matrices $\{A_\ell, B_\ell\}$ appear in the optimizer's parameter groups. The model still behaves as a standard PyTorch module — `generate()`, `forward()`, `state_dict()`, and `deepcopy` all work without modification. `ref_logprob()` is identical for both LoRA and full fine-tune: it always runs a forward pass through `_ref_model`. Only `snapshot_ref()` distinguishes the two cases: on the first call it does a full `deepcopy` regardless; on subsequent calls with LoRA active it calls `_copy_lora_weights()` which copies only the adapter keys into the existing `_ref_model`, leaving the frozen base weights untouched.
+
+The full class inventory is:
+
+```py
+# rollout data pipeline
+class RolloutBuffer:   pass   # accumulates (x_t, y_t, log_prob, reward) records per execution
+class RolloutDataset:  pass   # torch Dataset wrapping flushed records; injected via set_rollout_dataset()
+class RolloutCollator: pass   # pads and stacks records into batched tensors for Trainer.train()
+
+# mutation
+class Mutator:         pass   # references trainer.model; calls trainer.ref_logprob(); drives maybe_finetune()
+
+# trainer hierarchy — Trainer owns model and reference snapshot; PPO/GRPO override compute_loss()
+class BaseTrainer(Trainer):    pass
+class PPOTrainer(BaseTrainer):  pass
+class GRPOTrainer(BaseTrainer): pass
+```
 
 ## Ablation considerations, left as todo for later, do not attend to this
 
