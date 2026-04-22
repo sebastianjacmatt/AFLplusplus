@@ -43,6 +43,7 @@ class BaseTrainer(Trainer):
     def __init__(self, model_cfg: ModelConfig, training_cfg: TrainingConfig):
         tokenizer = AutoTokenizer.from_pretrained(model_cfg.model_name_or_path)
         model     = AutoModelForSeq2SeqLM.from_pretrained(model_cfg.model_name_or_path)
+        output_dir = _resolve_output_dir()
 
         if training_cfg.grpo is not None and training_cfg.train_batch_size != training_cfg.grpo.group_size:
             raise ValueError(
@@ -61,7 +62,7 @@ class BaseTrainer(Trainer):
             ))
 
         args = TrainingArguments(
-            output_dir                  = "/tmp/rlm_trainer",
+            output_dir                  = output_dir,
             per_device_train_batch_size = training_cfg.train_batch_size,
             learning_rate               = training_cfg.learning_rate,
             num_train_epochs            = training_cfg.num_train_epochs,
@@ -251,3 +252,22 @@ def _copy_lora_weights(src, dst) -> None:
 def _csv_opt(v) -> str:
     """Render None as empty string for CSV; otherwise str()."""
     return "" if v is None else str(v)
+
+
+def _resolve_output_dir() -> str:
+    """Choose a durable run-local trainer output directory.
+
+    Preference order:
+      1. Explicit RLM_OUTPUT_DIR override.
+      2. AFL's custom-mutator output dir for this run.
+      3. AFL's general output dir.
+      4. /tmp fallback for non-AFL testing.
+    """
+    base_dir = (
+        os.environ.get("RLM_OUTPUT_DIR")
+        or os.environ.get("AFL_CUSTOM_INFO_OUT")
+        or os.environ.get("__AFL_OUT_DIR")
+    )
+    if base_dir:
+        return os.path.join(base_dir, "rlm_trainer")
+    return "/tmp/rlm_trainer"

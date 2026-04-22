@@ -202,17 +202,26 @@ If `enable_logging` is `true`:
 
 - HF Trainer step logs are emitted every `logging_steps`
 - rollout summaries are logged before each finetune
-- a CSV of per-sample rollout data is written to:
+- a CSV of per-sample rollout data is written under the AFL++ output dir for the run:
 
 ```text
-/tmp/rlm_trainer/rollout_samples.csv
+$AFL_CUSTOM_INFO_OUT/rlm_trainer/rollout_samples.csv
 ```
 
-The trainer `output_dir` is currently hardcoded in [base_trainer.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/base_trainer.py:63) as:
+By default, trainer outputs are written to:
 
 ```text
-/tmp/rlm_trainer
+$AFL_CUSTOM_INFO_OUT/rlm_trainer
 ```
+
+You can override this with:
+
+```bash
+export RLM_OUTPUT_DIR=/some/path
+```
+
+If neither `RLM_OUTPUT_DIR` nor AFL's output-dir env vars are present, the code
+falls back to `/tmp/rlm_trainer` for non-AFL testing.
 
 ## GRPO-Specific Checks Already Implemented
 
