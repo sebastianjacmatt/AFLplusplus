@@ -2,14 +2,15 @@ name: rlm-grpo
 channels:
   - conda-forge
 dependencies:
-  - python=3.12
+  - python=3.10
   - pip
   - pip:
-      - torch>=2.6
-      - transformers>=4.52
-      - accelerate>=1.0
-      - peft>=0.13
-      - numpy>=1.26
-      - tensorboard>=2.17
-      - sentencepiece>=0.2
-      - safetensors>=0.4
+      - torch==1.13.1
+      - transformers==4.29.2
+      - tokenizers==0.13.3
+      - accelerate==0.20.3
+      - peft==0.3.0
+      - numpy>=1.23,<2
+      - tensorboard>=2.10,<3
+      - sentencepiece>=0.1.97,<0.2
+      - safetensors>=0.3,<0.5

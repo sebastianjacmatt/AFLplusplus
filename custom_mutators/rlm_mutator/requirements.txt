@@ -1,22 +1,19 @@
-# Python runtime for the AFL++ GRPO mutator.
+# Compatibility runtime for CodeT5 + LoRA on the AFL++ GRPO mutator.
 #
-# This covers the imports used by:
-#   - rlm.py
-#   - config.py
-#   - base_trainer.py
-#   - mutator.py
-#   - rewarding.py
+# This intentionally uses an older Hugging Face stack than the default modern
+# setup because newer `transformers` releases have been tripping over CodeT5's
+# tokenizer metadata at load time.
 #
-# Note:
-#   `torch` is included so a fresh environment can import the mutator.
-#   If your remote machine needs a CUDA-specific PyTorch build, replace this
-#   line with the appropriate wheel / conda package for that machine.
+# If the target machine needs a CUDA-specific PyTorch build, replace the
+# `torch==1.13.1` line with the appropriate 1.13.1-compatible build for that
+# machine.
 
-torch>=2.6
-transformers>=4.52
-accelerate>=1.0
-peft>=0.13
-numpy>=1.26
-tensorboard>=2.17
-sentencepiece>=0.2
-safetensors>=0.4
+torch==1.13.1
+transformers==4.29.2
+tokenizers==0.13.3
+accelerate==0.20.3
+peft==0.3.0
+numpy>=1.23,<2
+tensorboard>=2.10,<3
+sentencepiece>=0.1.97,<0.2
+safetensors>=0.3,<0.5
