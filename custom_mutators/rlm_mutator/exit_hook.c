@@ -19,7 +19,7 @@
  *   gcc -shared -fPIC -O2 -o exit_hook.so exit_hook.c
  *
  * Usage (RLM_EXIT_FILE is set automatically by rlm.py::init()):
- *   LD_PRELOAD=/path/to/exit_hook.so  afl-fuzz -i seeds -o out -- ./target @@
+ *   AFL_PRELOAD=/path/to/exit_hook.so  afl-fuzz -i seeds -o out -- ./target @@
  */
 
 #define _GNU_SOURCE

@@ -1,0 +1,22 @@
+# Python runtime for the AFL++ GRPO mutator.
+#
+# This covers the imports used by:
+#   - rlm.py
+#   - config.py
+#   - base_trainer.py
+#   - mutator.py
+#   - rewarding.py
+#
+# Note:
+#   `torch` is included so a fresh environment can import the mutator.
+#   If your remote machine needs a CUDA-specific PyTorch build, replace this
+#   line with the appropriate wheel / conda package for that machine.
+
+torch>=2.6
+transformers>=4.52
+accelerate>=1.0
+peft>=0.13
+numpy>=1.26
+tensorboard>=2.17
+sentencepiece>=0.2
+safetensors>=0.4

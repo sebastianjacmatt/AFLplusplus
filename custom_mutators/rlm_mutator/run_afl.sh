@@ -66,7 +66,7 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONPATH="$HOME/Documents/AFLplusplus/custom_mutators/rlm_mutator"
 export AFL_PYTHON_MODULE=rlm
 export AFL_CUSTOM_MUTATOR_ONLY=1
-export LD_PRELOAD="$EXIT_HOOK_SO"
+export AFL_PRELOAD="$EXIT_HOOK_SO"
 
 if [ -n "$CONFIG" ]; then
   export RLM_CONFIG="$CONFIG"
