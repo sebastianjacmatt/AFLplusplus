@@ -115,11 +115,9 @@ def init(seed: int) -> None:
 
 def deinit() -> None:
     """Called once before AFL++ exits."""
-    global BUFFER
-    if BUFFER is not None and len(BUFFER) > 0:
-        flushed = BUFFER.flush()
-        if flushed:
-            log.info("[rlm] deinit — dropped %d completed records", len(flushed))
+    if MUTATOR is not None and BUFFER is not None and len(BUFFER) > 0:
+        log.info("[rlm] deinit — finalizing remaining rollout records")
+        MUTATOR.maybe_finetune()
 
 
 
@@ -167,6 +165,7 @@ def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
     if MUTATOR is None:
         raise RuntimeError("fuzz() called before init()")
 
+    _clear_exit_code_file()
     out = MUTATOR.generate(max_size)
     return bytearray(out) if out is not None else buf
 
@@ -202,3 +201,17 @@ def _read_exit_code() -> int | None:
             return int(fh.read().strip())
     except (OSError, ValueError):
         return None
+    finally:
+        _clear_exit_code_file()
+
+
+def _clear_exit_code_file() -> None:
+    """Remove any stale exit-code file before/after a child execution."""
+    if _exit_code_path is None:
+        return
+    try:
+        os.remove(_exit_code_path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("[rlm] failed to remove exit-code file %s: %s", _exit_code_path, exc)
