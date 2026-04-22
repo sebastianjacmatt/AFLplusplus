@@ -95,8 +95,6 @@ def init(seed: int) -> None:
     MUTATOR = Mutator(TRAINER, BUFFER, AFL_CFG, TRAIN_CFG)
     IDF = OnlineIDF(bitmap_size=AFL_CFG.bitmap_size, alpha=AFL_CFG.idf_alpha)
 
-    _trace_bits_view = attach_trace_bits(AFL_CFG.bitmap_size)
-
     # Set before the forkserver starts so the child inherits it.
     _exit_code_path = f"/tmp/rlm_exit_{os.getpid()}"
     os.environ["RLM_EXIT_FILE"] = _exit_code_path
@@ -173,8 +171,15 @@ def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
 
 def post_run() -> None:
     """Assemble scalar reward from bitmap novelty and exit status."""
-    if MUTATOR is None or IDF is None or _trace_bits_view is None:
+    global _trace_bits_view
+
+    if MUTATOR is None or IDF is None:
         raise RuntimeError("post_run() called before init()")
+
+    if _trace_bits_view is None:
+        if AFL_CFG is None:
+            raise RuntimeError("post_run() called before AFL config is available")
+        _trace_bits_view = attach_trace_bits(AFL_CFG.bitmap_size)
 
     bitmap = _trace_bits_view.copy()
     cov_reward = IDF.reward(bitmap)  # always updates IDF state

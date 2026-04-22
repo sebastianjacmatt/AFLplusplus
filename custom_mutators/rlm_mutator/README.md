@@ -117,7 +117,7 @@ ls -l exit_hook.so
 Before launching AFL++, make sure the activated env can import the required packages:
 
 ```bash
-python -c "import torch, transformers, accelerate, peft, numpy, tensorboard, sentencepiece, safetensors"
+python -c "import torch, transformers, accelerate, peft, numpy, six, tensorboard, tensorboardX, sentencepiece, safetensors"
 ```
 
 If this fails, fix the env before running AFL++.
@@ -189,10 +189,10 @@ The launcher automatically sets:
 
 The AFL++ lifecycle is:
 
-1. `init()` loads config, trainer, tokenizer/model, reward state, and SHM.
+1. `init()` loads config, trainer, tokenizer/model, and reward state.
 2. `fuzz_count()` prepares the next seed and may trigger finetuning.
 3. `fuzz()` generates mutations and records policy actions.
-4. `post_run()` computes reward and patches the pending rollout record.
+4. `post_run()` lazily attaches to AFL++ coverage SHM on first use, computes reward, and patches the pending rollout record.
 5. `maybe_finetune()` drains completed records and runs one HF `Trainer.train()` cycle.
 6. `deinit()` performs one last finetune on any remaining completed records.
 
@@ -276,7 +276,7 @@ Run these in order:
 
 ```bash
 conda activate rlm-grpo
-python -c "import torch, transformers, accelerate, peft, numpy, tensorboard, sentencepiece, safetensors"
+python -c "import torch, transformers, accelerate, peft, numpy, six, tensorboard, tensorboardX, sentencepiece, safetensors"
 ldd ~/Documents/AFLplusplus/afl-fuzz | grep libpython
 cd ~/Documents/AFLplusplus/custom_mutators/rlm_mutator
 gcc -shared -fPIC -O2 -o exit_hook.so exit_hook.c
