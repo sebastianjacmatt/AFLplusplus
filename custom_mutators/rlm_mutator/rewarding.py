@@ -16,6 +16,7 @@ matching CovRL Eq. 7.  Reward is computed with the *previous* IDF vector
 import ctypes
 import math
 import os
+import mmap as py_mmap
 
 import numpy as np
 
@@ -27,19 +28,54 @@ import numpy as np
 def attach_trace_bits(bitmap_size: int) -> np.ndarray:
     """Attach to AFL++'s trace_bits SHM segment and return a numpy view.
 
-    Must be called after AFL++ has set __AFL_SHM_ID in the environment.
+    Must be called after AFL++ has set __AFL_SHM_ID in the process
+    environment. AFL++ may update this from C after Python startup, so we
+    consult libc.getenv() rather than relying only on os.environ.
+
+    On older / SysV builds, __AFL_SHM_ID is an integer shmid and we attach
+    with shmat(). On newer USEMMAP builds, it is a POSIX shm name (for
+    example "/afl_<pid>_<rand>") and we attach with shm_open() + mmap().
     The returned array is a live view — copy it before the next execution
     overwrites the segment.
 
     @param bitmap_size: Coverage bitmap size in bytes (e.g. 65536 for 2**16).
     @return: uint8 numpy array of length bitmap_size backed by the SHM.
     """
-    shm_id_str = os.environ.get("__AFL_SHM_ID", "")
-    if not shm_id_str:
+    shm_ref = _get_process_env("__AFL_SHM_ID")
+    if not shm_ref:
         raise RuntimeError(
             "__AFL_SHM_ID not set — is AFL++ running with instrumentation enabled?"
         )
-    shm_id = int(shm_id_str)
+
+    if _looks_like_int(shm_ref):
+        return _attach_sysv_trace_bits(int(shm_ref), bitmap_size)
+    return _attach_posix_trace_bits(shm_ref, bitmap_size)
+
+
+def _get_process_env(name: str) -> str:
+    """Read the live process environment via libc.getenv().
+
+    AFL++ mutates the environment from C after the Python interpreter has
+    already started, so Python's os.environ mapping may be stale here.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    getenv = libc.getenv
+    getenv.restype = ctypes.c_char_p
+    getenv.argtypes = [ctypes.c_char_p]
+
+    value = getenv(name.encode())
+    if value:
+        return value.decode()
+    return os.environ.get(name, "")
+
+
+def _looks_like_int(value: str) -> bool:
+    value = value.strip()
+    return value.isdigit() or (value.startswith("-") and value[1:].isdigit())
+
+
+def _attach_sysv_trace_bits(shm_id: int, bitmap_size: int) -> np.ndarray:
+    """Attach to a SysV SHM segment identified by integer shmid."""
 
     libc  = ctypes.CDLL(None, use_errno=True)
     shmat = libc.shmat
@@ -51,6 +87,55 @@ def attach_trace_bits(bitmap_size: int) -> np.ndarray:
     if ptr is None or ptr == ctypes.c_void_p(-1).value:
         errno = ctypes.get_errno()
         raise OSError(errno, f"shmat failed for SHM id {shm_id}: errno={errno}")
+
+    ArrayType = ctypes.c_uint8 * bitmap_size
+    buf = ArrayType.from_address(ptr)
+    return np.frombuffer(buf, dtype=np.uint8)
+
+
+def _attach_posix_trace_bits(shm_name: str, bitmap_size: int) -> np.ndarray:
+    """Attach to a POSIX shared-memory object exported by USEMMAP builds."""
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    shm_open = libc.shm_open
+    shm_open.restype = ctypes.c_int
+    shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint]
+
+    mmap_fn = libc.mmap
+    mmap_fn.restype = ctypes.c_void_p
+    mmap_fn.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_long,
+    ]
+
+    close = libc.close
+    close.restype = ctypes.c_int
+    close.argtypes = [ctypes.c_int]
+
+    fd = shm_open(shm_name.encode(), os.O_RDONLY, 0)
+    if fd < 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, f"shm_open failed for {shm_name}: errno={errno}")
+
+    try:
+        ptr = mmap_fn(
+            None,
+            bitmap_size,
+            py_mmap.PROT_READ,
+            py_mmap.MAP_SHARED,
+            fd,
+            0,
+        )
+    finally:
+        close(fd)
+
+    if ptr is None or ptr == ctypes.c_void_p(-1).value:
+        errno = ctypes.get_errno()
+        raise OSError(errno, f"mmap failed for {shm_name}: errno={errno}")
 
     ArrayType = ctypes.c_uint8 * bitmap_size
     buf = ArrayType.from_address(ptr)
