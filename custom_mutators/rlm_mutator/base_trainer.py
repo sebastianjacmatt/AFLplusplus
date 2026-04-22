@@ -16,6 +16,7 @@ import os
 import statistics
 
 import torch
+from torch.utils.data import DataLoader, SequentialSampler
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -24,7 +25,7 @@ from transformers import (
 )
 
 from config  import ModelConfig, TrainingConfig
-from rollout import RolloutCollator, RolloutDataset
+from rollout import GroupedBatchSampler, RolloutCollator, RolloutDataset
 
 
 class BaseTrainer(Trainer):
@@ -43,6 +44,12 @@ class BaseTrainer(Trainer):
         tokenizer = AutoTokenizer.from_pretrained(model_cfg.model_name_or_path)
         model     = AutoModelForSeq2SeqLM.from_pretrained(model_cfg.model_name_or_path)
 
+        if training_cfg.grpo is not None and training_cfg.train_batch_size != training_cfg.grpo.group_size:
+            raise ValueError(
+                f"TrainingConfig.train_batch_size ({training_cfg.train_batch_size}) must equal "
+                f"GRPOConfig.group_size ({training_cfg.grpo.group_size})."
+            )
+
         if training_cfg.lora_r > 0:
             from peft import LoraConfig, TaskType, get_peft_model
             model = get_peft_model(model, LoraConfig(
@@ -59,8 +66,9 @@ class BaseTrainer(Trainer):
             learning_rate               = training_cfg.learning_rate,
             num_train_epochs            = training_cfg.num_train_epochs,
             save_strategy               = "no",
-            report_to                   = "tensorboard",
-            logging_strategy            = "no",
+            report_to                   = "tensorboard" if training_cfg.enable_logging else "none",
+            logging_strategy            = "steps" if training_cfg.enable_logging else "no",
+            logging_steps               = training_cfg.logging_steps if training_cfg.enable_logging else 500,
             remove_unused_columns       = False,   # keep custom fields in the batch dict
         )
 
@@ -132,6 +140,31 @@ class BaseTrainer(Trainer):
     # Dataset injection — called by Mutator.maybe_finetune()
     # ------------------------------------------------------------------
 
+    def get_train_dataloader(self):
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        if self.training_cfg.grpo is not None:
+            group_size = self.training_cfg.grpo.group_size
+            if self.args.per_device_train_batch_size != group_size:
+                raise ValueError(
+                    f"per_device_train_batch_size ({self.args.per_device_train_batch_size}) must "
+                    f"equal GRPO group_size ({group_size})."
+                )
+            return DataLoader(
+                self.train_dataset,
+                batch_sampler = GroupedBatchSampler(self.train_dataset, group_size),
+                collate_fn    = self.data_collator,
+            )
+
+        return DataLoader(
+            self.train_dataset,
+            batch_size = self.args.per_device_train_batch_size,
+            sampler    = SequentialSampler(self.train_dataset),
+            collate_fn = self.data_collator,
+            drop_last  = False,
+        )
+
     def set_rollout_dataset(self, records: list[dict]) -> None:
         self.train_dataset = RolloutDataset(records)
 
@@ -149,8 +182,9 @@ class BaseTrainer(Trainer):
 
         Called from Mutator.maybe_finetune() before trainer.train() so the scalars
         reflect the behaviour-policy data that is about to drive the update.
+        No-op when ``training_cfg.enable_logging`` is False.
         """
-        if not records:
+        if not records or not self.training_cfg.enable_logging:
             return
 
         finetune_id = self._finetune_id

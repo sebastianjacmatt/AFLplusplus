@@ -88,9 +88,10 @@ class Mutator:
         # Per-seed state (reset in on_new_seed)
         self._tokens:   list[int] | None = None
         self._masked:   list[int] | None = None
-        self._group:    int               = 0
+        self._group:    int               = -1
         self._sample:   int               = 0
         self._pending_sample_id: str | None = None
+        self._next_group_id: int = 0
 
     # ------------------------------------------------------------------
     # Convenience accessor — mirrors design's trainer.model indirection
@@ -108,21 +109,24 @@ class Mutator:
         """fuzz_count(): tokenize once, reset per-seed state."""
         self._tokens = self.tokenize(buf)
         self._masked = None
-        self._group  = 0
+        self._group  = -1
         self._sample = 0
 
     def generate(self, max_size: int) -> bytes | None:
         """fuzz(): one mutation.  Returns mutated bytes, or None to keep original.
 
         Re-masks at each `sample % group_size == 0` boundary so that every
-        group_size samples in a group share one x_t (GRPO precondition).
+        group_size samples in a group share one x_t (GRPO precondition). The
+        recorded group_id is monotonic across seeds so grouped training never
+        merges unrelated samples from different seeds.
         """
         if self._tokens is None:
             raise RuntimeError("Mutator.generate() called before on_new_seed()")
 
         if self._sample % self.training_cfg.group_size == 0:
             self._masked = self._random_mask(list(self._tokens))
-            self._group += 1
+            self._group = self._next_group_id
+            self._next_group_id += 1
 
         masked = self._masked
         if masked is None or len(masked) <= 3:
@@ -287,10 +291,13 @@ class Mutator:
     def _generate(self, input_ids_t, attn_mask_t):
         cfg = self.trainer.model_cfg
         if cfg.sample_method == "contrastive":
+            # In Transformers, do_sample=True selects multinomial sampling.
+            # Contrastive search is activated by penalty_alpha > 0 and top_k > 1
+            # on the non-sampling generation path.
             return self.model.generate(
                 input_ids               = input_ids_t,
                 attention_mask          = attn_mask_t,
-                do_sample               = True,
+                do_sample               = False,
                 penalty_alpha           = cfg.penalty_alpha,
                 top_k                   = cfg.top_k,
                 eos_token_id            = self._eos_token,

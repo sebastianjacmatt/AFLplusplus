@@ -31,7 +31,7 @@ all three groups can coexist in a single JSON object.
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Literal, Optional
 
 import torch
@@ -181,7 +181,12 @@ class TrainingConfig:
     )
     train_batch_size: int = field(
         default=8,
-        metadata={"help": "Samples per gradient update."},
+        metadata={
+            "help": (
+                "Samples per gradient update. For GRPO this must equal "
+                "group_size so each batch contains exactly one reward group."
+            )
+        },
     )
     num_train_epochs: int = field(
         default=1,
@@ -210,6 +215,20 @@ class TrainingConfig:
     lora_target_modules: str = field(
         default="q,v",
         metadata={"help": "Comma-separated attention projection names for LoRA adapters."},
+    )
+    enable_logging: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Master logging switch. True: report_to='tensorboard', rollout CSV "
+                "written, per-step train/rollout scalars emitted via self.log(). "
+                "False: report_to='none', no CSV, no scalar emissions."
+            )
+        },
+    )
+    logging_steps: int = field(
+        default=1,
+        metadata={"help": "Number of optimizer steps between Trainer log entries."},
     )
 
     # Algorithm-specific sub-configs — set by load_config(), not via JSON directly.
@@ -257,24 +276,50 @@ def load_config(
         import json
         with open(path) as fh:
             raw = json.load(fh)
-
         model_cfg, afl_cfg, train_cfg = _PARSER.parse_dict(raw, allow_extra_keys=True)
     else:
+        raw = {}
         model_cfg, afl_cfg, train_cfg = ModelConfig(), AFLConfig(), TrainingConfig()
 
-    # Attach algorithm sub-config.
+    if train_cfg.logging_steps < 1:
+        raise ValueError(
+            f"TrainingConfig.logging_steps ({train_cfg.logging_steps}) must be >= 1."
+        )
+
+    if model_cfg.sample_method == "contrastive":
+        if model_cfg.penalty_alpha <= 0.0:
+            raise ValueError(
+                "ModelConfig.penalty_alpha must be > 0 when sample_method='contrastive'."
+            )
+        if model_cfg.top_k <= 1:
+            raise ValueError(
+                "ModelConfig.top_k must be > 1 when sample_method='contrastive'."
+            )
+
+    # Attach algorithm sub-config — flat JSON keys like "group_size" are
+    # picked up here, since HfArgumentParser only parses the three top-level
+    # dataclasses.
     if train_cfg.algorithm == "grpo":
-        if train_cfg.grpo is None:
-            train_cfg.grpo = GRPOConfig()
-        train_cfg.ppo = None
+        train_cfg.grpo = GRPOConfig(**_sub_kwargs(raw, GRPOConfig))
+        train_cfg.ppo  = None
+        if train_cfg.train_batch_size != train_cfg.grpo.group_size:
+            raise ValueError(
+                f"TrainingConfig.train_batch_size ({train_cfg.train_batch_size}) must equal "
+                f"GRPOConfig.group_size ({train_cfg.grpo.group_size})."
+            )
         if afl_cfg.fuzz_count % train_cfg.grpo.group_size != 0:
             raise ValueError(
                 f"AFLConfig.fuzz_count ({afl_cfg.fuzz_count}) must be divisible by "
                 f"GRPOConfig.group_size ({train_cfg.grpo.group_size})."
             )
     else:
-        if train_cfg.ppo is None:
-            train_cfg.ppo = PPOConfig()
+        train_cfg.ppo  = PPOConfig(**_sub_kwargs(raw, PPOConfig))
         train_cfg.grpo = None
 
     return model_cfg, afl_cfg, train_cfg
+
+
+def _sub_kwargs(raw: dict, cls) -> dict:
+    """Select the top-level raw-dict keys that match ``cls`` dataclass fields."""
+    names = {f.name for f in fields(cls)}
+    return {k: v for k, v in raw.items() if k in names}

@@ -10,7 +10,7 @@ Record schema (one dict per sample):
 
     {
         "sample_id":       str,    # "s00000000"
-        "group_id":        int,    # group index within the current seed
+        "group_id":        int,    # rollout-unique group identifier for GRPO
         "x_t":             list,   # masked encoder input token IDs
         "y_t":             list,   # generated decoder token IDs
         "log_prob":        float,  # mean per-token log-prob under the behaviour actor
@@ -25,7 +25,7 @@ Record schema (one dict per sample):
 from typing import Optional
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +115,45 @@ class RolloutDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
+# GroupedBatchSampler — keeps each GRPO reward group in one batch
+# ---------------------------------------------------------------------------
+
+class GroupedBatchSampler(Sampler[list[int]]):
+    """Yield one full GRPO group per batch, preserving first-seen group order."""
+
+    def __init__(self, dataset: RolloutDataset, group_size: int):
+        self._batches: list[list[int]] = []
+
+        groups: dict[int, list[int]] = {}
+        group_order: list[int] = []
+        for idx in range(len(dataset)):
+            try:
+                gid = int(dataset[idx]["group_id"])
+            except KeyError as exc:
+                raise ValueError("GroupedBatchSampler requires dataset records with 'group_id'.") from exc
+
+            if gid not in groups:
+                groups[gid] = []
+                group_order.append(gid)
+            groups[gid].append(idx)
+
+        for gid in group_order:
+            batch = groups[gid]
+            if len(batch) != group_size:
+                raise ValueError(
+                    f"Group {gid} has {len(batch)} samples, expected {group_size}."
+                )
+            self._batches.append(batch)
+
+    def __iter__(self):
+        for batch in self._batches:
+            yield list(batch)
+
+    def __len__(self) -> int:
+        return len(self._batches)
+
+
+# ---------------------------------------------------------------------------
 # RolloutCollator — callable passed as HF Trainer's data_collator
 # ---------------------------------------------------------------------------
 
@@ -127,7 +166,7 @@ class RolloutCollator:
       labels            [B, L_y]    pad = -100 (HF convention: loss ignores pads)
       old_log_prob      [B]         float32
       reward            [B]         float32
-      group_id          [B]         int64
+      group_id          [B]         int64      rollout-unique GRPO group id
       ref_log_prob      [B]         float32    (0.0 if record has None)
       value_pred        [B]         float32    (0.0 if record has None)
     """

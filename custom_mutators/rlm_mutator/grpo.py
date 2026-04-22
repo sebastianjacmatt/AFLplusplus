@@ -22,7 +22,9 @@ class GRPOTrainer(BaseTrainer):
 
     One masked context x_g is reused across training_cfg.grpo.group_size
     samples (enforced by Mutator).  The group structure survives into
-    compute_loss via inputs['group_id'], which RolloutCollator emits.
+    compute_loss via inputs['group_id'], which RolloutCollator emits. Group
+    ids are allocated monotonically across rollouts so different seeds never
+    alias into the same GRPO normalization group.
     """
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -67,8 +69,9 @@ class GRPOTrainer(BaseTrainer):
             kl   = torch.zeros_like(log_prob)
             loss = actor_loss
 
-        with torch.no_grad():
-            self._log_train_scalars(actor_loss, advantages, ratio, kl, reward, group_id, clip_eps)
+        if self.training_cfg.enable_logging:
+            with torch.no_grad():
+                self._log_train_scalars(actor_loss, advantages, ratio, kl, reward, group_id, clip_eps)
 
         return (loss, outputs) if return_outputs else loss
 
