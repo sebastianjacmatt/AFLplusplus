@@ -65,7 +65,7 @@ The final mutated program represented as a `bytearray` is then executed on the t
 The mutated program $z'_t$ is added to the queue $Z_{t+1}$ if it produced new coverage.
 Our mutation process utilizes the queue of programs $Z_t$ by extracting the top most $z_t$ and decoding the 
 We denote our mutation fuzzing approach in terms of AFL as the following
-
+```txt
 
 Function queue_get():
     seed_count += 1
@@ -108,7 +108,7 @@ Function post_run():
     b_t  = read_shm_bitmap()          # snapshot of AFL++ trace_bits SHM
     r_t  = -1.0 if e_t != 0 else R_cov(b_t)
     df.append(r_t)
-
+```
 
 after the mutation process we execute the now mutated program $z'_t$ on the target binary $T$ under the fuzzing context $o_t$ at timestep $t$ and record coverage rewards $r_t=R(z'_t,o_t)$. The reward of $r_t$ is not the same as $r_{t+1}$ as the global bitmap $b_t$ continually update each \texttt{fuzz()}
 
@@ -251,6 +251,8 @@ $$
 where $\beta \ge 0$ controls the strength of the KL penalty.
 
 Methodologically, PPO fits naturally when each rollout sample is treated independently. The grouping structure used during mutation is then ignored during optimization, and the policy is updated directly from the per-sample rewards and critic-derived advantages.
+
+How advantage is calculated remains and outstanding issue?
 
 ### GRPO
 
@@ -519,38 +521,4 @@ class BaseTrainer(Trainer):    pass
 class PPOTrainer(BaseTrainer):  pass
 class GRPOTrainer(BaseTrainer): pass
 ```
-
-## Ablation considerations, left as todo for later, do not attend to this
-
-We consider ablation studies on;
-- general
-- fuzz_count()
-- train_batch_size
-- learning rate
-- LoRA
-    - LoRA target modules
-    - rank $r$
-    - lora $\alpha$
-    - lora dropout
-- policy gradients (ppo/grpo)
-    - masking probability
-    - top_k + sampling methods
-    - finetune interval
-    - kl coefficient $\beta$
-    - clip $\epsilon$
-    - KL $\pi_{ref}$ interval
-    - different idf $\alpha$
-- ppo
-    - value_coef
-    - entropy_coef
-    - gea $\lambda$
-    - LoRA
-- grpo
-    - LoRA
-    - group_size
-    - norm $\epsilon$
-- different language models
-    - codet5p
-    - larger bert models
-
 

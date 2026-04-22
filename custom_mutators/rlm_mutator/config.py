@@ -183,6 +183,10 @@ class TrainingConfig:
         default=8,
         metadata={"help": "Samples per gradient update."},
     )
+    num_train_epochs: int = field(
+        default=1,
+        metadata={"help": "number of training epochs"},
+    )
     kl_coef: float = field(
         default=0.0,
         metadata={"help": "KL penalty coefficient beta (requires reference model if > 0)."},
