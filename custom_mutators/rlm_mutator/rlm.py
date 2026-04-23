@@ -112,10 +112,17 @@ def init(seed: int) -> None:
 
 
 def deinit() -> None:
-    """Called once before AFL++ exits."""
-    if MUTATOR is not None and BUFFER is not None and len(BUFFER) > 0:
-        log.info("[rlm] deinit — finalizing remaining rollout records")
-        MUTATOR.maybe_finetune()
+    """Called once before AFL++ exits — flush rollout CSV and save model checkpoint."""
+    if MUTATOR is None or BUFFER is None:
+        return
+
+    records = BUFFER.flush()
+    if records:
+        log.info("[rlm] deinit — logging %d remaining rollout records", len(records))
+        MUTATOR.trainer.log_rollout_dataset(records)
+
+    log.info("[rlm] deinit — saving model checkpoint to %s", MUTATOR.trainer.args.output_dir)
+    MUTATOR.trainer.save_model()
 
 
 
