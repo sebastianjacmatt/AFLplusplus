@@ -22,7 +22,6 @@
  */
 
 #define _GNU_SOURCE
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -84,23 +83,18 @@ static void exit_hook_init(void) {
 
 void exit(int code) {
     write_exit(code);
-    _exit(code);
+    syscall(SYS_exit_group, code);
+    __builtin_unreachable();
 }
 
 void _exit(int code) {
     write_exit(code);
-    typedef void (*exit_fn)(int);
-    exit_fn real = (exit_fn) dlsym(RTLD_NEXT, "_exit");
-    if (real) real(code);
     syscall(SYS_exit_group, code);
     __builtin_unreachable();
 }
 
 void _Exit(int code) {
     write_exit(code);
-    typedef void (*exit_fn)(int);
-    exit_fn real = (exit_fn) dlsym(RTLD_NEXT, "_Exit");
-    if (real) real(code);
     syscall(SYS_exit_group, code);
     __builtin_unreachable();
 }
