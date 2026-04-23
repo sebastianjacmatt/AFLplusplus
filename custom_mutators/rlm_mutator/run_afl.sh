@@ -67,6 +67,7 @@ export PYTHONPATH="$HOME/Documents/AFLplusplus/custom_mutators/rlm_mutator"
 export AFL_PYTHON_MODULE=rlm
 export AFL_CUSTOM_MUTATOR_ONLY=1
 export AFL_PRELOAD="$EXIT_HOOK_SO"
+export RLM_EXIT_FILE="$HOME/Documents/data_store/out/$RUN_NAME/rlm_exit"
 
 if [ -n "$CONFIG" ]; then
   export RLM_CONFIG="$CONFIG"

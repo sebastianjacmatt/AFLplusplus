@@ -60,13 +60,21 @@ class ModelConfig:
         default=0.15,
         metadata={"help": "Fraction of max_length used as decoder budget per mutation."},
     )
-    sample_method: Literal["greedy", "contrastive"] = field(
-        default="greedy",
-        metadata={"help": "Generation strategy: 'greedy' or 'contrastive' search."},
+    sample_method: Literal["greedy", "contrastive", "sampling"] = field(
+        default="sampling",
+        metadata={"help": "Generation strategy: 'greedy', 'contrastive', or 'sampling' (multinomial). GRPO requires 'sampling' for intra-group diversity."},
     )
     top_k: int = field(
-        default=8,
-        metadata={"help": "top-k for contrastive search (ignored for greedy)."},
+        default=50,
+        metadata={"help": "top-k for contrastive/sampling (ignored for greedy)."},
+    )
+    top_p: float = field(
+        default=0.95,
+        metadata={"help": "nucleus sampling threshold (sampling mode only)."},
+    )
+    temperature: float = field(
+        default=1.0,
+        metadata={"help": "softmax temperature for multinomial sampling."},
     )
     penalty_alpha: float = field(
         default=0.6,
@@ -302,6 +310,12 @@ def load_config(
     if train_cfg.algorithm == "grpo":
         train_cfg.grpo = GRPOConfig(**_sub_kwargs(raw, GRPOConfig))
         train_cfg.ppo  = None
+        if model_cfg.sample_method != "sampling":
+            raise ValueError(
+                f"GRPO requires sample_method='sampling' for intra-group diversity; "
+                f"got '{model_cfg.sample_method}'. Deterministic decoding produces "
+                f"identical y_t for every sample in a group, collapsing the advantage."
+            )
         if train_cfg.train_batch_size != train_cfg.grpo.group_size:
             raise ValueError(
                 f"TrainingConfig.train_batch_size ({train_cfg.train_batch_size}) must equal "

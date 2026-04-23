@@ -95,9 +95,14 @@ def init(seed: int) -> None:
     MUTATOR = Mutator(TRAINER, BUFFER, AFL_CFG, TRAIN_CFG)
     IDF = OnlineIDF(bitmap_size=AFL_CFG.bitmap_size, alpha=AFL_CFG.idf_alpha)
 
-    # Set before the forkserver starts so the child inherits it.
-    _exit_code_path = f"/tmp/rlm_exit_{os.getpid()}"
-    os.environ["RLM_EXIT_FILE"] = _exit_code_path
+    # Prefer RLM_EXIT_FILE from the shell wrapper — it's guaranteed to be in
+    # AFL's env before the forkserver starts. Fall back to a /tmp path only
+    # when unset (e.g. when running outside run_afl.sh).
+    _exit_code_path = os.environ.get("RLM_EXIT_FILE")
+    if not _exit_code_path:
+        _exit_code_path = f"/tmp/rlm_exit_{os.getpid()}"
+        os.environ["RLM_EXIT_FILE"] = _exit_code_path
+        log.warning("[rlm] RLM_EXIT_FILE not set by shell; using fallback %s", _exit_code_path)
 
     _queue_get_count = 0
     _finetune_pending = False

@@ -291,9 +291,6 @@ class Mutator:
     def _generate(self, input_ids_t, attn_mask_t):
         cfg = self.trainer.model_cfg
         if cfg.sample_method == "contrastive":
-            # In Transformers, do_sample=True selects multinomial sampling.
-            # Contrastive search is activated by penalty_alpha > 0 and top_k > 1
-            # on the non-sampling generation path.
             return self.model.generate(
                 input_ids               = input_ids_t,
                 attention_mask          = attn_mask_t,
@@ -307,9 +304,24 @@ class Mutator:
                 output_scores           = True,
                 return_dict_in_generate = True,
             )
+        if cfg.sample_method == "sampling":
+            return self.model.generate(
+                input_ids               = input_ids_t,
+                attention_mask          = attn_mask_t,
+                do_sample               = True,
+                temperature             = cfg.temperature,
+                top_p                   = cfg.top_p,
+                top_k                   = cfg.top_k,
+                eos_token_id            = self._eos_token,
+                no_repeat_ngram_size    = 3,
+                max_length              = self._max_pred,
+                output_scores           = True,
+                return_dict_in_generate = True,
+            )
         return self.model.generate(
             input_ids               = input_ids_t,
             attention_mask          = attn_mask_t,
+            do_sample               = False,
             eos_token_id            = self._eos_token,
             no_repeat_ngram_size    = 3,
             max_length              = self._max_pred,

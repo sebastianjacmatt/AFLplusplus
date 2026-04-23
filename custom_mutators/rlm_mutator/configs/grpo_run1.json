@@ -3,8 +3,10 @@
   "device":             "cuda",
   "max_length":         512,
   "mask_probability":   0.15,
-  "sample_method":      "contrastive",
-  "top_k":              8,
+  "sample_method":      "sampling",
+  "top_k":              50,
+  "top_p":              0.95,
+  "temperature":        1.0,
   "penalty_alpha":      0.6,
 
   "fuzz_count":     512,
