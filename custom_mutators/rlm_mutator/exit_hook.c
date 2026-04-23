@@ -50,6 +50,15 @@ static void write_exit(int code) {
 }
 
 static void on_signal(int sig) {
+    int lfd = open("/tmp/exit_hook.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (lfd >= 0) {
+        char buf[128];
+        int n = snprintf(buf, sizeof(buf),
+                         "on_signal pid=%d sig=%d\n",
+                         (int) getpid(), sig);
+        if (n > 0) { ssize_t w = write(lfd, buf, (size_t) n); (void) w; }
+        close(lfd);
+    }
     write_exit(128 + sig);
     /* Reset to default and re-raise so AFL's waitpid sees the real signal. */
     struct sigaction sa;
@@ -64,6 +73,15 @@ static void on_signal(int sig) {
  * interposable by LD_PRELOAD). Receives the exit status as first arg. */
 static void on_exit_cb(int status, void *arg) {
     (void) arg;
+    int lfd = open("/tmp/exit_hook.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (lfd >= 0) {
+        char buf[128];
+        int n = snprintf(buf, sizeof(buf),
+                         "on_exit_cb pid=%d status=%d\n",
+                         (int) getpid(), status);
+        if (n > 0) { ssize_t w = write(lfd, buf, (size_t) n); (void) w; }
+        close(lfd);
+    }
     write_exit(status);
 }
 
