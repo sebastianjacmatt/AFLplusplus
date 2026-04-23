@@ -59,6 +59,16 @@ static void on_signal(int sig) {
     raise(sig);
 }
 
+/* glibc's on_exit callback: invoked from within the exit() path, so this
+ * fires even when libc calls its internal __GI_exit alias (which is not
+ * interposable by LD_PRELOAD). Receives the exit status as first arg. */
+static void on_exit_cb(int status, void *arg) {
+    (void) arg;
+    write_exit(status);
+}
+
+extern int on_exit(void (*)(int, void *), void *);
+
 __attribute__((constructor))
 static void exit_hook_init(void) {
     if (!getenv("RLM_EXIT_FILE")) {
@@ -67,6 +77,8 @@ static void exit_hook_init(void) {
         ssize_t w = write(2, msg, sizeof(msg) - 1);
         (void) w;
     }
+
+    on_exit(on_exit_cb, NULL);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
