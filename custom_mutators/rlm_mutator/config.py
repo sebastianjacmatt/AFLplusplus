@@ -76,6 +76,10 @@ class ModelConfig:
         default=1.0,
         metadata={"help": "softmax temperature for multinomial sampling."},
     )
+    max_new_tokens_per_mask: int = field(
+        default=16,
+        metadata={"help": "Maximum generated tokens allowed per masked span during infill."},
+    )
     penalty_alpha: float = field(
         default=0.6,
         metadata={"help": "Degeneration penalty alpha for contrastive search."},
@@ -105,7 +109,27 @@ class AFLConfig:
     )
     mask_count: int = field(
         default=3,
-        metadata={"help": "Maximum mask tokens inserted or overwritten per mutation."},
+        metadata={"help": "Maximum original tokens replaced inside one masked span."},
+    )
+    mask_strategy: Literal["span", "scatter"] = field(
+        default="span",
+        metadata={"help": "Masking strategy. 'span' is safer and closer to CodeT5 pretraining."},
+    )
+    insert_mask_prob: float = field(
+        default=0.0,
+        metadata={"help": "Probability of creating an insertion hole instead of replacing an existing span."},
+    )
+    invalid_coverage_scale: float = field(
+        default=1.0,
+        metadata={"help": "How much coverage reward to preserve on non-zero exits."},
+    )
+    invalid_exit_penalty: float = field(
+        default=1.25,
+        metadata={"help": "Penalty subtracted from preserved coverage reward on non-zero exits."},
+    )
+    missing_exit_penalty: float = field(
+        default=1.5,
+        metadata={"help": "Penalty used when exit_hook did not report an exit code."},
     )
     bitmap_size: int = field(
         default=65536,
@@ -292,6 +316,36 @@ def load_config(
     if train_cfg.logging_steps < 1:
         raise ValueError(
             f"TrainingConfig.logging_steps ({train_cfg.logging_steps}) must be >= 1."
+        )
+
+    if model_cfg.max_new_tokens_per_mask < 1:
+        raise ValueError(
+            f"ModelConfig.max_new_tokens_per_mask ({model_cfg.max_new_tokens_per_mask}) must be >= 1."
+        )
+
+    if afl_cfg.mask_count < 1:
+        raise ValueError(
+            f"AFLConfig.mask_count ({afl_cfg.mask_count}) must be >= 1."
+        )
+
+    if not 0.0 <= afl_cfg.insert_mask_prob <= 1.0:
+        raise ValueError(
+            f"AFLConfig.insert_mask_prob ({afl_cfg.insert_mask_prob}) must be in [0, 1]."
+        )
+
+    if afl_cfg.invalid_coverage_scale < 0.0:
+        raise ValueError(
+            f"AFLConfig.invalid_coverage_scale ({afl_cfg.invalid_coverage_scale}) must be >= 0."
+        )
+
+    if afl_cfg.invalid_exit_penalty < 0.0:
+        raise ValueError(
+            f"AFLConfig.invalid_exit_penalty ({afl_cfg.invalid_exit_penalty}) must be >= 0."
+        )
+
+    if afl_cfg.missing_exit_penalty < 0.0:
+        raise ValueError(
+            f"AFLConfig.missing_exit_penalty ({afl_cfg.missing_exit_penalty}) must be >= 0."
         )
 
     if model_cfg.sample_method == "contrastive":

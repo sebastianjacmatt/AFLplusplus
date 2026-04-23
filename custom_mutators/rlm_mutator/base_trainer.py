@@ -88,6 +88,7 @@ class BaseTrainer(Trainer):
         # Rollout-CSV bookkeeping (populated in log_rollout_dataset).
         self._finetune_id: int = 0
         self._rollout_csv_path: str = os.path.join(self.args.output_dir, "rollout_samples.csv")
+        self._artifact_root: str = os.path.join(self.args.output_dir, "rollout_artifacts")
 
     # ------------------------------------------------------------------
     # Reference snapshot — LoRA-aware, but callers don't need to know
@@ -176,6 +177,7 @@ class BaseTrainer(Trainer):
     _CSV_HEADER = (
         "finetune_id", "sample_id", "group_id", "reward",
         "coverage_reward", "exit_code", "log_prob", "ref_log_prob",
+        "masked_program_path", "generated_infill_path", "executed_program_path",
     )
 
     def log_rollout_dataset(self, records: list[dict]) -> None:
@@ -198,6 +200,7 @@ class BaseTrainer(Trainer):
             if write_header:
                 writer.writerow(self._CSV_HEADER)
             for r in records:
+                artifact_paths = self._write_rollout_artifacts(finetune_id, r)
                 writer.writerow((
                     finetune_id,
                     r["sample_id"],
@@ -207,18 +210,28 @@ class BaseTrainer(Trainer):
                     _csv_opt(r.get("exit_code")),
                     r["log_prob"],
                     _csv_opt(r.get("ref_log_prob")),
+                    artifact_paths["masked_program_path"],
+                    artifact_paths["generated_infill_path"],
+                    artifact_paths["executed_program_path"],
                 ))
 
         rewards   = [r["reward"] for r in records]
         cov_vals  = [r["coverage_reward"] for r in records if r.get("coverage_reward") is not None]
         n_samples = len(records)
         n_groups  = len({r["group_id"] for r in records})
+        valid_rate = sum(1 for r in records if r.get("exit_code") == 0) / n_samples
         error_rate = sum(1 for r in records if (r.get("exit_code") or 0) != 0) / n_samples
 
         groups: dict[int, list[float]] = {}
+        group_exit_codes: dict[int, set[int | None]] = {}
         for r in records:
             groups.setdefault(r["group_id"], []).append(r["reward"])
+            group_exit_codes.setdefault(r["group_id"], set()).add(r.get("exit_code"))
         group_means = [statistics.fmean(g) for g in groups.values()]
+        group_stds  = [statistics.pstdev(g) if len(g) > 1 else 0.0 for g in groups.values()]
+        mixed_exit_groups = sum(1 for exits in group_exit_codes.values() if len(exits) > 1)
+        all_valid_groups  = sum(1 for exits in group_exit_codes.values() if exits == {0})
+        all_invalid_groups = sum(1 for exits in group_exit_codes.values() if 0 not in exits)
 
         self.log({
             "rollout/finetune_id":          float(finetune_id),
@@ -226,12 +239,41 @@ class BaseTrainer(Trainer):
             "rollout/reward_std":           statistics.pstdev(rewards) if n_samples > 1 else 0.0,
             "rollout/reward_min":           min(rewards),
             "rollout/reward_max":           max(rewards),
+            "rollout/valid_rate":           valid_rate,
             "rollout/error_rate":           error_rate,
             "rollout/coverage_reward_mean": statistics.fmean(cov_vals) if cov_vals else 0.0,
             "rollout/group_reward_mean":    statistics.fmean(group_means),
+            "rollout/group_reward_std_mean": statistics.fmean(group_stds) if group_stds else 0.0,
+            "rollout/mixed_exit_group_rate": mixed_exit_groups / n_groups if n_groups else 0.0,
+            "rollout/all_valid_group_rate": all_valid_groups / n_groups if n_groups else 0.0,
+            "rollout/all_invalid_group_rate": all_invalid_groups / n_groups if n_groups else 0.0,
             "rollout/n_samples":            float(n_samples),
             "rollout/n_groups":             float(n_groups),
         })
+
+    def _write_rollout_artifacts(self, finetune_id: int, record: dict) -> dict[str, str]:
+        """Persist replay/debug artifacts for one rollout sample."""
+        artifact_dir = os.path.join(self._artifact_root, f"finetune_{finetune_id:06d}")
+        os.makedirs(artifact_dir, exist_ok=True)
+
+        sample_id = record["sample_id"]
+        masked_path = _write_text(
+            os.path.join(artifact_dir, f"{sample_id}.masked.txt"),
+            record.get("masked_program"),
+        )
+        infill_path = _write_text(
+            os.path.join(artifact_dir, f"{sample_id}.infill.txt"),
+            record.get("generated_infill"),
+        )
+        executed_path = _write_bytes(
+            os.path.join(artifact_dir, f"{sample_id}.executed.bin"),
+            record.get("executed_program"),
+        )
+        return {
+            "masked_program_path": masked_path,
+            "generated_infill_path": infill_path,
+            "executed_program_path": executed_path,
+        }
 
     # ------------------------------------------------------------------
     # compute_loss — overridden by PPOTrainer / GRPOTrainer
@@ -252,6 +294,22 @@ def _copy_lora_weights(src, dst) -> None:
 def _csv_opt(v) -> str:
     """Render None as empty string for CSV; otherwise str()."""
     return "" if v is None else str(v)
+
+
+def _write_text(path: str, text: str | None) -> str:
+    if text is None:
+        return ""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return path
+
+
+def _write_bytes(path: str, data: bytes | None) -> str:
+    if data is None:
+        return ""
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
 
 
 def _resolve_output_dir() -> str:

@@ -13,6 +13,9 @@ Record schema (one dict per sample):
         "group_id":        int,    # rollout-unique group identifier for GRPO
         "x_t":             list,   # masked encoder input token IDs
         "y_t":             list,   # generated decoder token IDs
+        "masked_program":  str | None,    # human-readable masked source with <mask> spans
+        "generated_infill": str | None,   # decoded infill text emitted by the model
+        "executed_program": bytes | None, # exact bytes handed to AFL/target
         "log_prob":        float,  # mean per-token log-prob under the behaviour actor
         "reward":          float,  # scalar reward from post_run (exit-code gated)
         "coverage_reward": float | None,  # raw TF-IDF component before exit-code gate
@@ -54,6 +57,9 @@ class RolloutBuffer:
         x_t:          list,
         y_t:          list,
         log_prob:     float,
+        masked_program: Optional[str] = None,
+        generated_infill: Optional[str] = None,
+        executed_program: Optional[bytes] = None,
         ref_log_prob: Optional[float] = None,
         value_pred:   Optional[float] = None,
     ) -> None:
@@ -63,6 +69,9 @@ class RolloutBuffer:
             "group_id":        group_id,
             "x_t":             x_t,
             "y_t":             y_t,
+            "masked_program":  masked_program,
+            "generated_infill": generated_infill,
+            "executed_program": executed_program,
             "log_prob":        log_prob,
             "reward":          None,
             "coverage_reward": None,

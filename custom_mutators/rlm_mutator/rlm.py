@@ -206,7 +206,7 @@ def post_run() -> None:
     cov_reward = IDF.reward(bitmap)  # always updates IDF state
 
     exit_code = _read_exit_code()
-    reward = cov_reward if exit_code == 0 else -1.0
+    reward = _shape_reward(cov_reward, exit_code)
     MUTATOR.on_post_run(reward, coverage_reward=cov_reward, exit_code=exit_code)
 
     _post_run_calls += 1
@@ -257,3 +257,26 @@ def _clear_exit_code_file() -> None:
         pass
     except OSError as exc:
         log.warning("[rlm] failed to remove exit-code file %s: %s", _exit_code_path, exc)
+
+
+def _shape_reward(cov_reward: float, exit_code: int | None) -> float:
+    """Preserve some coverage signal even for invalid executions.
+
+    A hard gate to -1.0 collapses most invalid samples onto one reward, which
+    kills GRPO group variance. Instead:
+      - valid executions keep the full coverage reward
+      - invalid executions keep a scaled coverage component minus a penalty
+      - missing exit codes receive a slightly larger penalty
+    """
+    if AFL_CFG is None:
+        raise RuntimeError("_shape_reward() called before AFL config is available")
+
+    if exit_code == 0:
+        return cov_reward
+
+    penalty = (
+        AFL_CFG.missing_exit_penalty
+        if exit_code is None
+        else AFL_CFG.invalid_exit_penalty
+    )
+    return AFL_CFG.invalid_coverage_scale * cov_reward - penalty

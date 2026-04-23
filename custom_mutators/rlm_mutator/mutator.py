@@ -84,6 +84,7 @@ class Mutator:
         self._eos_token  = tok.eos_token_id
         self._vocab_size = tok.vocab_size
         self._max_pred   = round(trainer.model_cfg.max_length * trainer.model_cfg.mask_probability)
+        self._max_new_tokens_per_mask = trainer.model_cfg.max_new_tokens_per_mask
 
         # Per-seed state (reset in on_new_seed)
         self._tokens:   list[int] | None = None
@@ -146,12 +147,15 @@ class Mutator:
 
         sample_id = self.buffer.new_sample_id()
         self.buffer.log(
-            sample_id    = sample_id,
-            group_id     = self._group,
-            x_t          = result.x_t,
-            y_t          = result.y_t,
-            log_prob     = result.old_logprob,
-            ref_log_prob = ref_lp,
+            sample_id        = sample_id,
+            group_id         = self._group,
+            x_t              = result.x_t,
+            y_t              = result.y_t,
+            log_prob         = result.old_logprob,
+            masked_program   = self.render(masked, skip_special_tokens=False),
+            generated_infill = self.render(result.y_t, skip_special_tokens=False),
+            executed_program = bytes(out_buf),
+            ref_log_prob     = ref_lp,
         )
 
         self._pending_sample_id = sample_id
@@ -197,33 +201,55 @@ class Mutator:
         text = self.trainer.tokenizer.decode(token_ids, skip_special_tokens=True)
         return text.encode("utf-8")
 
+    def render(self, token_ids: list[int], skip_special_tokens: bool) -> str:
+        """Render token IDs to text for logging/debugging artifacts."""
+        return self.trainer.tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+
     # ------------------------------------------------------------------
     # Random masking (insert / overwrite)
     # ------------------------------------------------------------------
 
     def _random_mask(self, token_ids: list[int]) -> list[int]:
-        """Apply one random mask mutation to a token sequence.
+        """Apply one mask mutation to a token sequence.
 
-        Modes (equal probability):
-          0 — RANDOM_INSERT:    insert 1..mask_count MASK tokens at random positions
-          1 — RANDOM_OVERWRITE: replace 1..mask_count tokens in place
+        The default 'span' strategy is intentionally conservative and closer
+        to CodeT5/T5 span corruption than scattered token masking:
+          - replace one contiguous span of 1..mask_count tokens with one MASK
+          - optionally create a single insertion hole with insert_mask_prob
+
+        The legacy 'scatter' strategy keeps the old random insert/overwrite
+        behaviour for experiments.
         """
         result = list(token_ids)
-        mode   = random.randint(0, 1)
         mask   = self._mask_token
         cap    = self.afl_cfg.mask_count
 
-        if mode == 0:
-            count = random.randint(1, cap)
-            for _ in range(count):
-                pos = random.randint(0, len(result))
-                result.insert(pos, mask)
-        else:
-            if result:
-                count     = random.randint(1, min(cap, len(result)))
-                positions = random.sample(range(len(result)), count)
-                for pos in positions:
-                    result[pos] = mask
+        if self.afl_cfg.mask_strategy == "scatter":
+            mode = random.randint(0, 1)
+            if mode == 0:
+                count = random.randint(1, cap)
+                for _ in range(count):
+                    pos = random.randint(0, len(result))
+                    result.insert(pos, mask)
+            else:
+                if result:
+                    count     = random.randint(1, min(cap, len(result)))
+                    positions = random.sample(range(len(result)), count)
+                    for pos in positions:
+                        result[pos] = mask
+            return result
+
+        if not result:
+            return result
+
+        if random.random() < self.afl_cfg.insert_mask_prob:
+            pos = random.randint(0, len(result))
+            result.insert(pos, mask)
+            return result
+
+        span_len = random.randint(1, min(cap, len(result)))
+        start = random.randint(0, len(result) - span_len)
+        result[start:start + span_len] = [mask]
         return result
 
     # ------------------------------------------------------------------
@@ -250,6 +276,11 @@ class Mutator:
             )
             converted = converted[:max_len - 3]
 
+        max_pred = min(
+            self._max_pred,
+            max(2, len(mask_dict) * self._max_new_tokens_per_mask + 2),
+        )
+
         padded    = converted + [self._pad_token]
         attn_mask = [1] * len(converted) + [0]
 
@@ -259,7 +290,7 @@ class Mutator:
 
         self.model.eval()
         with torch.no_grad():
-            outputs = self._generate(input_ids_t, attn_mask_t)
+            outputs = self._generate(input_ids_t, attn_mask_t, max_pred)
 
         y_t, old_logprob = self._extract_logprob(outputs)
         infilled_ids     = self._reconstruct(padded, mask_dict, outputs.sequences.tolist()[0])
@@ -288,7 +319,7 @@ class Mutator:
                 converted[i]        = extra_id
         return converted, mask_dict
 
-    def _generate(self, input_ids_t, attn_mask_t):
+    def _generate(self, input_ids_t, attn_mask_t, max_pred: int):
         cfg = self.trainer.model_cfg
         if cfg.sample_method == "contrastive":
             return self.model.generate(
@@ -300,7 +331,7 @@ class Mutator:
                 eos_token_id            = self._eos_token,
                 no_repeat_ngram_size    = 3,
                 min_length              = 1,
-                max_length              = self._max_pred,
+                max_length              = max_pred,
                 output_scores           = True,
                 return_dict_in_generate = True,
             )
@@ -314,7 +345,7 @@ class Mutator:
                 top_k                   = cfg.top_k,
                 eos_token_id            = self._eos_token,
                 no_repeat_ngram_size    = 3,
-                max_length              = self._max_pred,
+                max_length              = max_pred,
                 output_scores           = True,
                 return_dict_in_generate = True,
             )
@@ -324,7 +355,7 @@ class Mutator:
             do_sample               = False,
             eos_token_id            = self._eos_token,
             no_repeat_ngram_size    = 3,
-            max_length              = self._max_pred,
+            max_length              = max_pred,
             output_scores           = True,
             return_dict_in_generate = True,
         )
