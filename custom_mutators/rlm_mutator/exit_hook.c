@@ -32,13 +32,38 @@
 
 static int s_written = 0;
 
+#include <errno.h>
+
 /* Async-signal-safe: uses only open/write/close + snprintf of a small int. */
 static void write_exit(int code) {
     if (s_written) return;
     const char *path = getenv("RLM_EXIT_FILE");
+
+    int lfd = open("/tmp/exit_hook.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (lfd >= 0) {
+        char lbuf[256];
+        int ln = snprintf(lbuf, sizeof(lbuf),
+                          "write_exit pid=%d path=%s code=%d\n",
+                          (int) getpid(), path ? path : "(null)", code);
+        if (ln > 0) { ssize_t w = write(lfd, lbuf, (size_t) ln); (void) w; }
+        close(lfd);
+    }
+
     if (!path) return;
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return;
+    if (fd < 0) {
+        int e = errno;
+        int elfd = open("/tmp/exit_hook.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (elfd >= 0) {
+            char ebuf[256];
+            int en = snprintf(ebuf, sizeof(ebuf),
+                              "write_exit OPEN FAILED pid=%d path=%s errno=%d\n",
+                              (int) getpid(), path, e);
+            if (en > 0) { ssize_t w = write(elfd, ebuf, (size_t) en); (void) w; }
+            close(elfd);
+        }
+        return;
+    }
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%d\n", code);
     if (n > 0) {
