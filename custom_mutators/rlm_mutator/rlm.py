@@ -50,6 +50,14 @@ _exit_code_path: Optional[str] = None
 _queue_get_count: int = 0
 _finetune_pending: bool = False
 
+# post_run diagnostics: tally exit-code outcomes so we can verify the hook
+# pipeline without a per-call log flood. Summaries emit every N post_runs.
+_post_run_calls: int = 0
+_exit_hits:      int = 0
+_exit_miss:      int = 0
+_exit_code_hist: dict[int, int] = {}
+_POST_RUN_LOG_EVERY: int = 256
+
 
 # ---------------------------------------------------------------------------
 # Trainer resolution
@@ -184,6 +192,7 @@ def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
 def post_run() -> None:
     """Assemble scalar reward from bitmap novelty and exit status."""
     global _trace_bits_view
+    global _post_run_calls, _exit_hits, _exit_miss
 
     if MUTATOR is None or IDF is None:
         raise RuntimeError("post_run() called before init()")
@@ -199,6 +208,22 @@ def post_run() -> None:
     exit_code = _read_exit_code()
     reward = cov_reward if exit_code == 0 else -1.0
     MUTATOR.on_post_run(reward, coverage_reward=cov_reward, exit_code=exit_code)
+
+    _post_run_calls += 1
+    if exit_code is None:
+        _exit_miss += 1
+    else:
+        _exit_hits += 1
+        _exit_code_hist[exit_code] = _exit_code_hist.get(exit_code, 0) + 1
+
+    if _post_run_calls % _POST_RUN_LOG_EVERY == 0:
+        hit_rate = _exit_hits / _post_run_calls if _post_run_calls else 0.0
+        log.info(
+            "[rlm] post_run tally: calls=%d hits=%d miss=%d hit_rate=%.2f hist=%s last(code=%s reward=%.4f cov=%.4f)",
+            _post_run_calls, _exit_hits, _exit_miss, hit_rate,
+            dict(sorted(_exit_code_hist.items())),
+            exit_code, reward, cov_reward,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +242,7 @@ def _read_exit_code() -> int | None:
         with open(_exit_code_path) as fh:
             return int(fh.read().strip())
     except (OSError, ValueError):
-        raise Exception("cannot read exit codes")
+        return None
     finally:
         _clear_exit_code_file()
 
