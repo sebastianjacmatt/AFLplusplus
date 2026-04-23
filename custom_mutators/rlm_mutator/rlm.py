@@ -217,7 +217,7 @@ def _read_exit_code() -> int | None:
         with open(_exit_code_path) as fh:
             return int(fh.read().strip())
     except (OSError, ValueError):
-        return None
+        raise Exception("cannot read exit codes")
     finally:
         _clear_exit_code_file()
 
