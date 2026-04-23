@@ -71,7 +71,20 @@ extern int on_exit(void (*)(int, void *), void *);
 
 __attribute__((constructor))
 static void exit_hook_init(void) {
-    if (!getenv("RLM_EXIT_FILE")) {
+    const char *path = getenv("RLM_EXIT_FILE");
+
+    /* Diagnostic: AFL redirects child stderr, so log to a file we can inspect.
+     * One line per child: pid + whether RLM_EXIT_FILE was visible. */
+    int lfd = open("/tmp/exit_hook.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (lfd >= 0) {
+        char buf[256];
+        int n = snprintf(buf, sizeof(buf), "pid=%d RLM_EXIT_FILE=%s\n",
+                         (int) getpid(), path ? path : "(unset)");
+        if (n > 0) { ssize_t w = write(lfd, buf, (size_t) n); (void) w; }
+        close(lfd);
+    }
+
+    if (!path) {
         const char msg[] =
             "[exit_hook] WARNING: RLM_EXIT_FILE not set — exit codes will not be recorded\n";
         ssize_t w = write(2, msg, sizeof(msg) - 1);
