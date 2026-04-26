@@ -114,7 +114,7 @@ We cite the validity signal in three layers:
 
 | Claim | Citation |
 |---|---|
-| "Non-zero exit = error" is the C/UNIX convention | GNU C Library Manual, *Process Completion Status* / *Exit Status* (https://www.gnu.org/software/libc/manual/html_node/Exit-Status.html); IEEE Std 1003.1-2017 (POSIX), `wait(2)` — defines `WIFEXITED`, `WIFSIGNALED`, `WEXITSTATUS`, `WTERMSIG`. |
+| "Non-zero exit = error" is the C/UNIX convention | GNU C Library Manual, *Process Completion Status* / *Exit Status* (https://www.gnu.org/software/libc/manual/html_node/Exit-Status.html); IEEE Std 1003.1-2017 (POSIX), `wait(2)` — defines `WIFEXITED`, `WIFSIGNALED`, `WEXITSTATUS`, `WTERMSIG`. https://sourceware.org/glibc/manual/2.43/pdf/libc.pdf https://sourceware.org/glibc/manual/latest/html_mono/libc.html#Exit-Status-1 |
 | Bug oracle = function on the run outcome | Manès et al., *The Art, Science, and Engineering of Fuzzing: A Survey*, IEEE TSE 2019. |
 | Sanitizer exit-code constants (86/23) | Serebryany, Bruening, Potapenko, Vyukov, *AddressSanitizer: A Fast Address Sanity Checker*, USENIX ATC 2012; Stepanov & Serebryany, *MemorySanitizer: fast detector of uninitialized memory use in C++*, CGO 2015. The constants themselves are documented at [docs/env_variables.md:1001-1022](../../../docs/env_variables.md) with `exit_code=86 (required for legacy reasons)`. |
 | Exit-code-as-oracle in libFuzzer | Serebryany, *Continuous Fuzzing with libFuzzer and AddressSanitizer*, IEEE SecDev 2016 + LLVM libFuzzer docs; constants in [FuzzerFlags.def:52-55](../../libfuzzer/FuzzerFlags.def). |
