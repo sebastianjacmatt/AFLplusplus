@@ -153,7 +153,7 @@ Important fields:
 
 - `algorithm`: should be `grpo`
 - `group_size`: GRPO group size
-- `train_batch_size`: must equal `group_size`
+- `train_batch_size`: must be a multiple of `group_size`
 - `fuzz_count`: must be divisible by `group_size`
 - `sample_method`: `greedy` or `contrastive`
 - `enable_logging`: enables trainer and rollout logging
@@ -227,7 +227,7 @@ falls back to `/tmp/rlm_trainer` for non-AFL testing.
 
 The current code already enforces the main GRPO correctness conditions:
 
-- `train_batch_size == group_size`
+- `train_batch_size % group_size == 0`
 - `fuzz_count % group_size == 0`
 - batches are grouped by `group_id`
 - `group_id` is unique across seeds within the rollout stream
@@ -271,9 +271,9 @@ Make sure the dataset exists at:
 ~/Documents/data_store/dataset/<dataset-name>
 ```
 
-### `TrainingConfig.train_batch_size must equal GRPOConfig.group_size`
+### `TrainingConfig.train_batch_size must be a multiple of GRPOConfig.group_size`
 
-Set `train_batch_size` and `group_size` to the same value in the config.
+Set `train_batch_size` to `group_size` or a whole-number multiple of it.
 
 ### `AFLConfig.fuzz_count must be divisible by GRPOConfig.group_size`
 
