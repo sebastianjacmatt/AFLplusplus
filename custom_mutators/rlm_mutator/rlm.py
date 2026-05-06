@@ -184,8 +184,8 @@ def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
         raise RuntimeError("fuzz() called before init()")
 
     _clear_exit_code_file()
-    out = MUTATOR.generate(max_size)
-    return bytearray(out) if out is not None else buf
+    out = MUTATOR.fuzz_one(max_size)
+    return out
 
 
 

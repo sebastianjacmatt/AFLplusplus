@@ -17,9 +17,6 @@ Record schema (one dict per sample):
         "exit_code":       int | None,    # target exit code, None on crash / missing file
         "log_prob":        float,  # mean per-token log-prob under the behaviour actor
         "ref_log_prob":    float | None,  # reference model log-prob (KL term, optional)
-        # todo; these are optional
-        masked_program: Optional[str] = None,
-        generated_infill: Optional[str] = None,
         executed_program: Optional[bytes] = None,
     }
 """
@@ -56,8 +53,6 @@ class RolloutBuffer:
         x_t:          list,
         y_t:          list,
         log_prob:     float,
-        masked_program: Optional[str] = None,
-        generated_infill: Optional[str] = None,
         executed_program: Optional[bytes] = None,
         ref_log_prob: Optional[float] = None,
         value_pred:   Optional[float] = None,
@@ -68,8 +63,6 @@ class RolloutBuffer:
             "group_id":        group_id,
             "x_t":             x_t,
             "y_t":             y_t,
-            "masked_program":  masked_program,
-            "generated_infill": generated_infill,
             "executed_program": executed_program,
             "log_prob":        log_prob,
             "reward":          None,

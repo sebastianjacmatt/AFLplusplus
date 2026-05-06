@@ -58,7 +58,19 @@ class ModelConfig:
     )
     mask_probability: float = field(
         default=0.15,
-        metadata={"help": "Fraction of max_length used as decoder budget per mutation."},
+        metadata={"help": "Fraction of input tokens corrupted by CodeT5 masked span prediction."},
+    )
+    mean_span_length: float = field(
+        default=3.0,
+        metadata={"help": "Mean corrupted span length for CodeT5 masked span prediction."},
+    )
+    min_span_length: int = field(
+        default=1,
+        metadata={"help": "Minimum corrupted span length for CodeT5 masked span prediction."},
+    )
+    max_span_length: int = field(
+        default=5,
+        metadata={"help": "Maximum corrupted span length for CodeT5 masked span prediction."},
     )
     sample_method: Literal["greedy", "contrastive", "sampling"] = field(
         default="sampling",
@@ -321,6 +333,29 @@ def load_config(
     if model_cfg.max_new_tokens_per_mask < 1:
         raise ValueError(
             f"ModelConfig.max_new_tokens_per_mask ({model_cfg.max_new_tokens_per_mask}) must be >= 1."
+        )
+
+    if not 0.0 <= model_cfg.mask_probability <= 1.0:
+        raise ValueError(
+            f"ModelConfig.mask_probability ({model_cfg.mask_probability}) must be in [0, 1]."
+        )
+
+    if model_cfg.min_span_length < 1:
+        raise ValueError(
+            f"ModelConfig.min_span_length ({model_cfg.min_span_length}) must be >= 1."
+        )
+
+    if model_cfg.max_span_length < model_cfg.min_span_length:
+        raise ValueError(
+            f"ModelConfig.max_span_length ({model_cfg.max_span_length}) must be >= "
+            f"ModelConfig.min_span_length ({model_cfg.min_span_length})."
+        )
+
+    if not model_cfg.min_span_length <= model_cfg.mean_span_length <= model_cfg.max_span_length:
+        raise ValueError(
+            f"ModelConfig.mean_span_length ({model_cfg.mean_span_length}) must be between "
+            f"ModelConfig.min_span_length ({model_cfg.min_span_length}) and "
+            f"ModelConfig.max_span_length ({model_cfg.max_span_length})."
         )
 
     if afl_cfg.mask_count < 1:
