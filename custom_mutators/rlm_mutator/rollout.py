@@ -2,7 +2,7 @@
 
 Three classes feed the HF Trainer from the AFL++ mutation loop:
 
-    RolloutBuffer    — two-phase in-memory store (log → patch_reward → flush)
+    RolloutBuffer    — two-phase in-memory store (log → patch_reward → flush/log)
     RolloutDataset   — torch Dataset over a flushed record list
     RolloutCollator  — pads and stacks records into batched tensors
 
@@ -21,14 +21,17 @@ Record schema (one dict per sample):
     }
 """
 
-from typing import Optional
+import csv
+import os
+import statistics
+from typing import Callable, Optional
 
 import torch
 from torch.utils.data import Dataset, Sampler
 
 
 # ---------------------------------------------------------------------------
-# RolloutBuffer — written by mutator.generate() and mutator.on_post_run()
+# RolloutBuffer — written by mutator.fuzz_one() and mutator.on_post_run()
 # ---------------------------------------------------------------------------
 
 class RolloutBuffer:
@@ -37,9 +40,10 @@ class RolloutBuffer:
     AFL++ drives the Python mutator from one thread, so no locking is needed.
     """
 
-    def __init__(self):
+    def __init__(self, logger: "RolloutLogger | None" = None):
         self._records: dict[str, dict] = {}
         self._counter: int = 0
+        self._logger = logger
 
     def new_sample_id(self) -> str:
         sid = f"s{self._counter:08d}"
@@ -86,13 +90,87 @@ class RolloutBuffer:
             rec["exit_code"]       = exit_code
 
     def flush(self) -> list[dict]:
-        """Return all records with a populated reward and clear the store."""
+        """Return all rewarded records, log them once, and clear the store."""
         complete = [r for r in self._records.values() if r["reward"] is not None]
+        if self._logger is not None:
+            self._logger.log_rollout(complete)
         self._records.clear()
         return complete
 
     def __len__(self) -> int:
         return len(self._records)
+
+
+# ---------------------------------------------------------------------------
+# Rollout logging
+# ---------------------------------------------------------------------------
+
+class RolloutLogger:
+    """Writes rollout CSV/artifacts and rollout/ scalar summaries."""
+
+    _CSV_HEADER = (
+        "finetune_id", "sample_id", "group_id", "reward",
+        "coverage_reward", "exit_code", "log_prob", "ref_log_prob",
+        "executed_program_path",
+    )
+
+    def __init__(
+        self,
+        output_dir: str,
+        enabled: bool,
+        log_fn: Callable[[dict], None] | None = None,
+    ):
+        self.enabled = enabled
+        self.log_fn = log_fn
+        self._finetune_id = 0
+        self._rollout_csv_path = os.path.join(output_dir, "rollout_samples.csv")
+        self._artifact_root = os.path.join(output_dir, "rollout_artifacts")
+
+    def log_rollout(self, records: list[dict]) -> None:
+        """Dump per-sample rows and rollout/ scalars for one dataset."""
+        if not records or not self.enabled:
+            return
+
+        finetune_id = self._finetune_id
+        self._finetune_id += 1
+
+        output_dir = os.path.dirname(self._rollout_csv_path)
+        os.makedirs(output_dir, exist_ok=True)
+        write_header = not os.path.exists(self._rollout_csv_path)
+        with open(self._rollout_csv_path, "a", newline="") as fh:
+            writer = csv.writer(fh)
+            if write_header:
+                writer.writerow(self._CSV_HEADER)
+            for r in records:
+                artifact_paths = self._write_rollout_artifacts(finetune_id, r)
+                writer.writerow((
+                    finetune_id,
+                    r["sample_id"],
+                    r["group_id"],
+                    r["reward"],
+                    _csv_opt(r.get("coverage_reward")),
+                    _csv_opt(r.get("exit_code")),
+                    r["log_prob"],
+                    _csv_opt(r.get("ref_log_prob")),
+                    artifact_paths["executed_program_path"],
+                ))
+
+        if self.log_fn is not None:
+            self.log_fn(_rollout_scalars(finetune_id, records))
+
+    def _write_rollout_artifacts(self, finetune_id: int, record: dict) -> dict[str, str]:
+        """Persist replay/debug artifacts for one rollout sample."""
+        artifact_dir = os.path.join(self._artifact_root, f"finetune_{finetune_id:06d}")
+        os.makedirs(artifact_dir, exist_ok=True)
+
+        sample_id = record["sample_id"]
+        executed_path = _write_bytes(
+            os.path.join(artifact_dir, f"{sample_id}.executed.bin"),
+            record.get("executed_program"),
+        )
+        return {
+            "executed_program_path": executed_path,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +191,57 @@ class RolloutDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         return self._records[idx]
+
+
+def _rollout_scalars(finetune_id: int, records: list[dict]) -> dict[str, float]:
+    rewards   = [r["reward"] for r in records]
+    cov_vals  = [r["coverage_reward"] for r in records if r.get("coverage_reward") is not None]
+    n_samples = len(records)
+    n_groups  = len({r["group_id"] for r in records})
+    valid_rate = sum(1 for r in records if r.get("exit_code") == 0) / n_samples
+    error_rate = sum(1 for r in records if (r.get("exit_code") or 0) != 0) / n_samples
+
+    groups: dict[int, list[float]] = {}
+    group_exit_codes: dict[int, set[int | None]] = {}
+    for r in records:
+        groups.setdefault(r["group_id"], []).append(r["reward"])
+        group_exit_codes.setdefault(r["group_id"], set()).add(r.get("exit_code"))
+    group_means = [statistics.fmean(g) for g in groups.values()]
+    group_stds  = [statistics.pstdev(g) if len(g) > 1 else 0.0 for g in groups.values()]
+    mixed_exit_groups = sum(1 for exits in group_exit_codes.values() if len(exits) > 1)
+    all_valid_groups  = sum(1 for exits in group_exit_codes.values() if exits == {0})
+    all_invalid_groups = sum(1 for exits in group_exit_codes.values() if 0 not in exits)
+
+    return {
+        "rollout/finetune_id":          float(finetune_id),
+        "rollout/reward_mean":          statistics.fmean(rewards),
+        "rollout/reward_std":           statistics.pstdev(rewards) if n_samples > 1 else 0.0,
+        "rollout/reward_min":           min(rewards),
+        "rollout/reward_max":           max(rewards),
+        "rollout/valid_rate":           valid_rate,
+        "rollout/error_rate":           error_rate,
+        "rollout/coverage_reward_mean": statistics.fmean(cov_vals) if cov_vals else 0.0,
+        "rollout/group_reward_mean":    statistics.fmean(group_means),
+        "rollout/group_reward_std_mean": statistics.fmean(group_stds) if group_stds else 0.0,
+        "rollout/mixed_exit_group_rate": mixed_exit_groups / n_groups if n_groups else 0.0,
+        "rollout/all_valid_group_rate": all_valid_groups / n_groups if n_groups else 0.0,
+        "rollout/all_invalid_group_rate": all_invalid_groups / n_groups if n_groups else 0.0,
+        "rollout/n_samples":            float(n_samples),
+        "rollout/n_groups":             float(n_groups),
+    }
+
+
+def _csv_opt(v) -> str:
+    """Render None as empty string for CSV; otherwise str()."""
+    return "" if v is None else str(v)
+
+
+def _write_bytes(path: str, data: bytes | None) -> str:
+    if data is None:
+        return ""
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
 
 
 # ---------------------------------------------------------------------------

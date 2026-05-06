@@ -90,7 +90,7 @@ class ModelConfig:
     )
     max_new_tokens_per_mask: int = field(
         default=16,
-        metadata={"help": "Maximum generated tokens allowed per masked span during infill."},
+        metadata={"help": "Maximum generated tokens allowed per masked span prediction."},
     )
     penalty_alpha: float = field(
         default=0.6,

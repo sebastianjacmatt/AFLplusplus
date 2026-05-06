@@ -14,7 +14,7 @@ The intended entry point is [run_afl.sh](/Users/sebastianmatthews/Documents/mast
 At a high level:
 
 1. AFL++ selects a seed.
-2. The mutator masks parts of the seed and asks the model to infill them.
+2. The mutator masks parts of the seed and asks the model to predict those spans.
 3. The mutator records:
    - the masked input `x_t`
    - the generated output `y_t`
@@ -27,7 +27,8 @@ At a high level:
 Relevant files:
 
 - [rlm.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/rlm.py:1): AFL++ hook entrypoint
-- [mutator.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/mutator.py:1): masking, generation, rollout logging
+- [mutator.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/mutator.py:1): tokenization, masking, generation, finetune orchestration
+- [rollout.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/rollout.py:1): rollout buffering, logging, datasets, collation
 - [grpo.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/grpo.py:1): GRPO loss
 - [base_trainer.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/base_trainer.py:1): HF trainer integration
 - [rewarding.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/rewarding.py:1): online TF-IDF coverage reward

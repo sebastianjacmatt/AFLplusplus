@@ -23,7 +23,7 @@ from typing import Optional
 from config import AFLConfig, ModelConfig, TrainingConfig, load_config
 from mutator import Mutator
 from rewarding import OnlineIDF, attach_trace_bits
-from rollout import RolloutBuffer
+from rollout import RolloutBuffer, RolloutLogger
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,7 +99,12 @@ def init(seed: int) -> None:
 
     trainer_cls = _resolve_trainer_cls(TRAIN_CFG.algorithm)
     TRAINER = trainer_cls(MODEL_CFG, TRAIN_CFG)
-    BUFFER = RolloutBuffer()
+    rollout_logger = RolloutLogger(
+        output_dir = TRAINER.args.output_dir,
+        enabled    = TRAIN_CFG.enable_logging,
+        log_fn     = TRAINER.log,
+    )
+    BUFFER = RolloutBuffer(logger=rollout_logger)
     MUTATOR = Mutator(TRAINER, BUFFER, AFL_CFG, TRAIN_CFG)
     IDF = OnlineIDF(bitmap_size=AFL_CFG.bitmap_size, alpha=AFL_CFG.idf_alpha)
 
@@ -131,8 +136,7 @@ def deinit() -> None:
 
     records = BUFFER.flush()
     if records:
-        log.info("[rlm] deinit — logging %d remaining rollout records", len(records))
-        MUTATOR.trainer.log_rollout_dataset(records)
+        log.info("[rlm] deinit — logged %d remaining rollout records", len(records))
 
     log.info("[rlm] deinit — saving model checkpoint to %s", MUTATOR.trainer.args.output_dir)
     MUTATOR.trainer.save_model()

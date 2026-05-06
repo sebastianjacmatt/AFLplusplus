@@ -5,7 +5,7 @@ Owns everything that lives between AFL++ bytes and the trainer:
     - Tokenisation (byte <-> token-id)
     - CodeT5-style masked span prediction via masking.CodeT5SpanMasker
     - Decoder sampling via the actor's generate()
-    - Rollout buffer logging (reward filled later by post_run)
+    - Rollout buffer writes (reward filled later by post_run)
     - Finetune trigger (flushes buffer, runs trainer.train, re-anchors ref)
 
 State that used to live as rlm.py module globals (cached seed tokens, current
@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 
 from config   import AFLConfig, TrainingConfig
-from rollout  import RolloutBuffer
+from rollout  import RolloutBuffer, RolloutDataset
 from masking  import CodeT5MaskedProgram, CodeT5SpanMasker
 from base_trainer import BaseTrainer
 
@@ -87,7 +87,6 @@ class Mutator:
             min_span_length   = trainer.model_cfg.min_span_length,
             max_span_length   = trainer.model_cfg.max_span_length,
         )
-
         # Per-seed state (reset in on_new_seed)
         self._tokens:   list[int]                  | None = None
         self._masked:   CodeT5MaskedProgram        | None = None
@@ -148,7 +147,6 @@ class Mutator:
                 "Adjust generation budget, masking parameters, or AFL max_size."
             )
 
-        # logging reference logprobs, --todo; move into rollout logger--
         ref_lp = None
         if self.training_cfg.kl_coef > 0.0:
             try:
@@ -194,9 +192,8 @@ class Mutator:
         if not records:
             log.info("[mutator] maybe_finetune — buffer empty, skipping")
             return
-        # --todo; move logging into rollout--
-        self.trainer.log_rollout_dataset(records)   # CSV + aggregated rollout/ scalars
-        self.trainer.set_rollout_dataset(records)
+        dataset = RolloutDataset(records)
+        self.trainer.set_rollout_dataset(dataset)
         self.trainer.train()                        # HF Trainer rebuilds optimizer each call
         self.trainer.snapshot_ref()                 # re-anchor pi_ref after weights updated
 

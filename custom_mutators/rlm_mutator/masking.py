@@ -101,8 +101,7 @@ class CodeT5SpanMasker:
         self.eos_token_id = tokenizer.eos_token_id
         self.decoder_start_token_id = getattr(tokenizer, "decoder_start_token_id", None)
 
-        #chat-note; T5/CodeT5 normally expose 100 sentinels, but max spans is a
-        # tokenizer capacity limit rather than an MSP objective parameter.
+        #note; T5/CodeT5 normally expose 100 sentinels, but max spans is a tokenizer capacity limit rather than an MSP objective parameter.
         self._max_sentinel_spans = 100
         self._sentinel_ids = [
             self._resolve_sentinel_id(i)
