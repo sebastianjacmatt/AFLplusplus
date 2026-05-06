@@ -174,6 +174,7 @@ class BaseTrainer(Trainer):
         """ compute_loss: overridden by specific Policy Gradient Algorithm """
         raise NotImplementedError("Policy Gradient Algorithm must override compute_loss")
 
+    # todo; move into rollout logging
     # ------------------------------------------------------------------
     # Rollout logging — called before set_rollout_dataset() + train()
     # ------------------------------------------------------------------
@@ -181,7 +182,7 @@ class BaseTrainer(Trainer):
     _CSV_HEADER = (
         "finetune_id", "sample_id", "group_id", "reward",
         "coverage_reward", "exit_code", "log_prob", "ref_log_prob",
-        "masked_program_path", "generated_infill_path", "executed_program_path",
+        "executed_program_path",
     )
 
     def log_rollout_dataset(self, records: list[dict]) -> None:
@@ -214,8 +215,6 @@ class BaseTrainer(Trainer):
                     _csv_opt(r.get("exit_code")),
                     r["log_prob"],
                     _csv_opt(r.get("ref_log_prob")),
-                    artifact_paths["masked_program_path"],
-                    artifact_paths["generated_infill_path"],
                     artifact_paths["executed_program_path"],
                 ))
 
@@ -261,23 +260,15 @@ class BaseTrainer(Trainer):
         os.makedirs(artifact_dir, exist_ok=True)
 
         sample_id = record["sample_id"]
-        masked_path = _write_text(
-            os.path.join(artifact_dir, f"{sample_id}.masked.txt"),
-            record.get("masked_program"),
-        )
-        infill_path = _write_text(
-            os.path.join(artifact_dir, f"{sample_id}.infill.txt"),
-            record.get("generated_infill"),
-        )
         executed_path = _write_bytes(
             os.path.join(artifact_dir, f"{sample_id}.executed.bin"),
             record.get("executed_program"),
         )
         return {
-            "masked_program_path": masked_path,
-            "generated_infill_path": infill_path,
             "executed_program_path": executed_path,
         }
+
+
 
 def _copy_lora_weights(src, dst) -> None:
     """Copy only lora_ keys from src state_dict into dst — O(|phi|), not O(|theta|)."""
@@ -285,28 +276,6 @@ def _copy_lora_weights(src, dst) -> None:
         {k: v for k, v in src.state_dict().items() if "lora_" in k},
         strict=False,
     )
-
-# todo; remove this _csv_opt as we should handle cases properly where logging is missing
-def _csv_opt(v) -> str:
-    """Render None as empty string for CSV; otherwise str()."""
-    return "" if v is None else str(v)
-
-
-def _write_text(path: str, text: str | None) -> str:
-    if text is None:
-        return ""
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    return path
-
-
-def _write_bytes(path: str, data: bytes | None) -> str:
-    if data is None:
-        return ""
-    with open(path, "wb") as fh:
-        fh.write(data)
-    return path
-
 
 def _resolve_output_dir() -> str:
     """Choose a durable run-local trainer output directory.
@@ -325,3 +294,17 @@ def _resolve_output_dir() -> str:
     if base_dir:
         return os.path.join(base_dir, "rlm_trainer")
     return "/tmp/rlm_trainer"
+
+# todo; move this into rollout logging
+# todo; remove this _csv_opt as we should handle cases properly where logging is missing, i.e. we should raise exception
+def _csv_opt(v) -> str:
+    """Render None as empty string for CSV; otherwise str()."""
+    return "" if v is None else str(v)
+
+
+def _write_bytes(path: str, data: bytes | None) -> str:
+    if data is None:
+        return ""
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
