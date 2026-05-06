@@ -215,8 +215,8 @@ class TrainingConfig:
         default=8,
         metadata={
             "help": (
-                "Samples per gradient update. For GRPO this must equal "
-                "group_size so each batch contains exactly one reward group."
+                "Samples per gradient update. For GRPO this must be a multiple "
+                "of group_size so each batch contains complete reward groups."
             )
         },
     )
@@ -370,9 +370,9 @@ def load_config(
                 f"got '{model_cfg.sample_method}'. Deterministic decoding produces "
                 f"identical y_t for every sample in a group, collapsing the advantage."
             )
-        if train_cfg.train_batch_size != train_cfg.grpo.group_size:
+        if train_cfg.train_batch_size % train_cfg.grpo.group_size != 0:
             raise ValueError(
-                f"TrainingConfig.train_batch_size ({train_cfg.train_batch_size}) must equal "
+                f"TrainingConfig.train_batch_size ({train_cfg.train_batch_size}) must be a multiple of "
                 f"GRPOConfig.group_size ({train_cfg.grpo.group_size})."
             )
         if afl_cfg.fuzz_count % train_cfg.grpo.group_size != 0:

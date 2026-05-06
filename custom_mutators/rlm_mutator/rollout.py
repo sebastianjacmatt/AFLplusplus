@@ -9,19 +9,18 @@ Three classes feed the HF Trainer from the AFL++ mutation loop:
 Record schema (one dict per sample):
 
     {
+        "finetune_id"      int     # last finetune id
         "sample_id":       str,    # "s00000000"
         "group_id":        int,    # rollout-unique group identifier for GRPO
-        "x_t":             list,   # masked encoder input token IDs
-        "y_t":             list,   # generated decoder token IDs
-        "masked_program":  str | None,    # human-readable masked source with <mask> spans
-        "generated_infill": str | None,   # decoded infill text emitted by the model
-        "executed_program": bytes | None, # exact bytes handed to AFL/target
-        "log_prob":        float,  # mean per-token log-prob under the behaviour actor
         "reward":          float,  # scalar reward from post_run (exit-code gated)
         "coverage_reward": float | None,  # raw TF-IDF component before exit-code gate
         "exit_code":       int | None,    # target exit code, None on crash / missing file
+        "log_prob":        float,  # mean per-token log-prob under the behaviour actor
         "ref_log_prob":    float | None,  # reference model log-prob (KL term, optional)
-        "value_pred":      float | None,  # critic value estimate (PPO, optional)
+        # todo; these are optional
+        masked_program: Optional[str] = None,
+        generated_infill: Optional[str] = None,
+        executed_program: Optional[bytes] = None,
     }
 """
 
@@ -128,10 +127,36 @@ class RolloutDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 class GroupedBatchSampler(Sampler[list[int]]):
-    """Yield one full GRPO group per batch, preserving first-seen group order."""
+    """Yield minibatches made from complete GRPO groups.
 
-    def __init__(self, dataset: RolloutDataset, group_size: int):
+    The minibatch size is controlled by ``batch_size``. If ``batch_size`` equals
+    ``group_size``, each batch contains one group; if it is larger, each batch
+    contains multiple complete groups.
+    """
+
+    def __init__(self, dataset: RolloutDataset, batch_size: int, group_size: int):
         self._batches: list[list[int]] = []
+
+        if (
+            not isinstance(batch_size, int)
+            or isinstance(batch_size, bool)
+            or batch_size <= 0
+        ):
+            raise ValueError(
+                f"batch_size should be a positive integer value, got {batch_size}."
+            )
+        if (
+            not isinstance(group_size, int)
+            or isinstance(group_size, bool)
+            or group_size <= 0
+        ):
+            raise ValueError(
+                f"group_size should be a positive integer value, got {group_size}."
+            )
+        if batch_size % group_size != 0:
+            raise ValueError(
+                f"batch_size ({batch_size}) must be a multiple of group_size ({group_size})."
+            )
 
         groups: dict[int, list[int]] = {}
         group_order: list[int] = []
@@ -139,7 +164,9 @@ class GroupedBatchSampler(Sampler[list[int]]):
             try:
                 gid = int(dataset[idx]["group_id"])
             except KeyError as exc:
-                raise ValueError("GroupedBatchSampler requires dataset records with 'group_id'.") from exc
+                raise ValueError(
+                    f"GroupedBatchSampler requires record {idx} to have 'group_id'."
+                ) from exc
 
             if gid not in groups:
                 groups[gid] = []
@@ -147,12 +174,31 @@ class GroupedBatchSampler(Sampler[list[int]]):
             groups[gid].append(idx)
 
         for gid in group_order:
-            batch = groups[gid]
-            if len(batch) != group_size:
+            group = groups[gid]
+            if len(group) != group_size:
                 raise ValueError(
-                    f"Group {gid} has {len(batch)} samples, expected {group_size}."
+                    f"Group {gid} has {len(group)} samples, expected {group_size}."
                 )
-            self._batches.append(batch)
+
+        if len(dataset) % batch_size != 0:
+            raise ValueError(
+                f"dataset size ({len(dataset)}) must be divisible by batch_size ({batch_size}) "
+                "so every optimizer step uses a full GRPO batch."
+            )
+
+        batch: list[int] = []
+        for gid in group_order:
+            group = groups[gid]
+            batch.extend(group)
+            if len(batch) == batch_size:
+                self._batches.append(batch)
+                batch = []
+
+        if batch:
+            raise ValueError(
+                f"Internal error: built a partial batch of {len(batch)} samples; "
+                f"expected full batches of {batch_size}."
+            )
 
     def __iter__(self):
         for batch in self._batches:

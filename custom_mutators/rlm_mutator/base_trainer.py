@@ -1,13 +1,12 @@
 """BaseTrainer for rlm_mutator.
 
 Subclasses HuggingFace `Trainer`.  Owns the model, the LoRA wrapper (applied
-conditionally from cfg), and the reference snapshot used for KL penalties.
-PPO and GRPO override `compute_loss` in ppo.py / grpo.py.
+conditionally from cfg), and the reference model used for KL penalties override.
+Policy Gradient Algorithm overides `compute_loss`
 
-Ownership model (see docs/design.md):
-
-    BaseTrainer OWNS:  self.model (HF Trainer convention), self._ref_model
-    Mutator     OWNS:  per-seed tokens, mask context, rollout buffer logging
+(see docs/design.md):
+BaseTrainer handles training and models 
+Mutator handles tokenization, rollouts and dataset creation.
 """
 
 import copy
@@ -29,8 +28,7 @@ from rollout import GroupedBatchSampler, RolloutCollator, RolloutDataset
 
 
 class BaseTrainer(Trainer):
-    """HF Trainer subclass shared by PPOTrainer and GRPOTrainer.
-
+    """
     Construction end-to-end from config:
       1. Load tokenizer + base model.
       2. Wrap with LoRA iff training_cfg.lora_r > 0.
@@ -43,11 +41,11 @@ class BaseTrainer(Trainer):
     def __init__(self, model_cfg: ModelConfig, training_cfg: TrainingConfig):
         tokenizer = AutoTokenizer.from_pretrained(model_cfg.model_name_or_path)
         model     = AutoModelForSeq2SeqLM.from_pretrained(model_cfg.model_name_or_path)
-        output_dir = _resolve_output_dir()
+        output_dir = _resolve_output_dir() # gets afl output dir
 
-        if training_cfg.grpo is not None and training_cfg.train_batch_size != training_cfg.grpo.group_size:
+        if training_cfg.grpo is not None and training_cfg.train_batch_size % training_cfg.grpo.group_size != 0:
             raise ValueError(
-                f"TrainingConfig.train_batch_size ({training_cfg.train_batch_size}) must equal "
+                f"TrainingConfig.train_batch_size ({training_cfg.train_batch_size}) must be a multiple of "
                 f"GRPOConfig.group_size ({training_cfg.grpo.group_size})."
             )
 
@@ -86,13 +84,10 @@ class BaseTrainer(Trainer):
         self.snapshot_ref()
 
         # Rollout-CSV bookkeeping (populated in log_rollout_dataset).
+        # todo, move this to mutator
         self._finetune_id: int = 0
         self._rollout_csv_path: str = os.path.join(self.args.output_dir, "rollout_samples.csv")
         self._artifact_root: str = os.path.join(self.args.output_dir, "rollout_artifacts")
-
-    # ------------------------------------------------------------------
-    # Reference snapshot — LoRA-aware, but callers don't need to know
-    # ------------------------------------------------------------------
 
     def snapshot_ref(self) -> None:
         """Re-anchor pi_ref to the current actor weights.
@@ -109,12 +104,8 @@ class BaseTrainer(Trainer):
             self._ref_model = copy.deepcopy(self.model)
 
     def ref_logprob(self, x_t: list[int], y_t: list[int]) -> float:
-        """Mean per-token log pi_ref(y_t | x_t)."""
+        """mean per-token log-probability pi_ref(y_t | x_t)."""
         return self.sequence_logprob(self._ref_model, x_t, y_t)
-
-    # ------------------------------------------------------------------
-    # Shared utilities used inside PPO/GRPO compute_loss
-    # ------------------------------------------------------------------
 
     def sequence_logprob(self, model, x_t: list[int], y_t: list[int]) -> float:
         """Mean per-token log pi(y_t | x_t) under the given model.
@@ -145,17 +136,21 @@ class BaseTrainer(Trainer):
     def get_train_dataloader(self):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
-
+        
+        # custom grouped sampler for grpo
         if self.training_cfg.grpo is not None:
             group_size = self.training_cfg.grpo.group_size
-            if self.args.per_device_train_batch_size != group_size:
+            if self.args.per_device_train_batch_size % group_size != 0:
                 raise ValueError(
-                    f"per_device_train_batch_size ({self.args.per_device_train_batch_size}) must "
-                    f"equal GRPO group_size ({group_size})."
+                    f"per_device_train_batch_size ({self.args.per_device_train_batch_size}) must be a multiple of GRPO group_size ({group_size})."
                 )
             return DataLoader(
                 self.train_dataset,
-                batch_sampler = GroupedBatchSampler(self.train_dataset, group_size),
+                batch_sampler = GroupedBatchSampler(
+                    dataset=    self.train_dataset, 
+                    batch_size= self.args.per_device_train_batch_size,
+                    group_size= group_size
+                    ),
                 collate_fn    = self.data_collator,
             )
 
@@ -169,6 +164,15 @@ class BaseTrainer(Trainer):
 
     def set_rollout_dataset(self, records: list[dict]) -> None:
         self.train_dataset = RolloutDataset(records)
+
+
+    # ------------------------------------------------------------------
+    # compute_loss — overridden by PPOTrainer / GRPOTrainer
+    # ------------------------------------------------------------------
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """ compute_loss: overridden by specific Policy Gradient Algorithm """
+        raise NotImplementedError("Policy Gradient Algorithm must override compute_loss")
 
     # ------------------------------------------------------------------
     # Rollout logging — called before set_rollout_dataset() + train()
@@ -275,14 +279,6 @@ class BaseTrainer(Trainer):
             "executed_program_path": executed_path,
         }
 
-    # ------------------------------------------------------------------
-    # compute_loss — overridden by PPOTrainer / GRPOTrainer
-    # ------------------------------------------------------------------
-
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        raise NotImplementedError("PPOTrainer / GRPOTrainer must override compute_loss")
-
-
 def _copy_lora_weights(src, dst) -> None:
     """Copy only lora_ keys from src state_dict into dst — O(|phi|), not O(|theta|)."""
     dst.load_state_dict(
@@ -290,7 +286,7 @@ def _copy_lora_weights(src, dst) -> None:
         strict=False,
     )
 
-
+# todo; remove this _csv_opt as we should handle cases properly where logging is missing
 def _csv_opt(v) -> str:
     """Render None as empty string for CSV; otherwise str()."""
     return "" if v is None else str(v)
