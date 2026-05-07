@@ -24,6 +24,7 @@ import torch.nn.functional as F
 from config   import AFLConfig, TrainingConfig
 from rollout  import RolloutBuffer, RolloutDataset
 from masking  import CodeT5MaskedProgram, CodeT5SpanMasker
+from rewarding import RewardResult
 from base_trainer import BaseTrainer
 
 log = logging.getLogger(__name__)
@@ -172,17 +173,13 @@ class Mutator:
 
     def on_post_run(
         self,
-        reward:          float,
-        coverage_reward: float | None = None, # --todo; should not be none--
-        exit_code:       int   | None = None, # --todo; should not be none, output all exit codes, not just 1/0--
+        reward_result: RewardResult,
     ) -> None:
         """post_run(): patch reward + diagnostic fields on the pending sample."""
         if self._pending_sample_id is not None:
             self.buffer.patch_reward(
                 self._pending_sample_id,
-                reward,
-                coverage_reward = coverage_reward,
-                exit_code       = exit_code,
+                reward_result,
             )
         self._pending_sample_id = None
 

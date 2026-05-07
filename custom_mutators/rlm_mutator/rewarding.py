@@ -1,24 +1,126 @@
-"""Online TF-IDF coverage reward for the rlm_mutator.
+"""Reward observation and shaping for rlm_mutator.
 
-Attaches to AFL++'s trace_bits shared memory segment once at init time,
-then computes a TF-IDF weighted coverage reward per execution inside
-post_run() — zero re-executions, zero subprocesses.
+CoverageRewarder owns the execution-side observations needed to score one
+mutation: it lazily attaches AFL++'s trace_bits shared-memory bitmap, reads
+and clears the exit-code file written by exit_hook.so, updates online IDF
+state, and returns a structured RewardResult.
 
-Reward range: scalar in [0.0, 1.0] for valid executions.
-  near-zero coverage (syntax error, empty run) → 0.5 floor
-  novel coverage                               → sigmoid(log(TF-IDF)) ∈ (0.5, 1.0]
-  heavily repeated coverage                    → approaches 0.5 from above
+RewardResult.reward is the scalar consumed by PPO/GRPO. The remaining fields
+are diagnostics carried into rollout CSV/logging so reward experiments can add
+or compare components without changing the trainer contract.
 
-IDF vector is updated with exponential momentum after every post_run() call,
-matching CovRL Eq. 7.  Reward is computed with the *previous* IDF vector
-(before this sample's update) matching CovRL Eq. 5.
+Coverage reward follows the CovRL-style online TF-IDF signal:
+  near-zero/old coverage -> 0.5 floor
+  novel weighted coverage -> sigmoid(log(TF-IDF)) in (0.5, 1.0]
+  repeated coverage -> approaches the floor as IDF momentum adapts
+
+The IDF vector updates after every reward computation. The reward for the
+current sample is computed from the previous IDF vector, then the vector is
+updated for the next sample.
 """
 import ctypes
 import math
 import os
 import mmap as py_mmap
+from dataclasses import asdict, dataclass, fields
 
 import numpy as np
+
+
+@dataclass(frozen=True)
+class RewardResult:
+    """Structured reward output.
+
+    ``reward`` is the scalar consumed by RL. The remaining fields explain how
+    that scalar was produced and are carried into rollout logging.
+    """
+
+    reward: float
+    coverage_reward: float | None = None
+    exit_code: int | None = None
+    valid: bool = False
+    reward_reason: str | None = None
+    novelty_score: float | None = None
+    crash: bool | None = None
+    timeout: bool | None = None
+
+    def as_record_fields(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def diagnostic_field_names(cls) -> tuple[str, ...]:
+        return tuple(field.name for field in fields(cls) if field.name != "reward")
+
+
+class CoverageRewarder:
+    """Combine online IDF coverage reward with execution outcome policy."""
+
+    def __init__(
+        self,
+        idf: "OnlineIDF",
+        bitmap_size: int,
+        exit_code_path: str,
+        invalid_coverage_scale: float,
+        invalid_exit_penalty: float,
+        missing_exit_penalty: float,
+    ):
+        self.idf = idf
+        self.bitmap_size = bitmap_size
+        self.exit_code_path = exit_code_path
+        self.invalid_coverage_scale = invalid_coverage_scale
+        self.invalid_exit_penalty = invalid_exit_penalty
+        self.missing_exit_penalty = missing_exit_penalty
+        self._trace_bits_view = None
+
+    def compute(self) -> RewardResult:
+        bitmap = self._trace_bitmap()
+        exit_code = self._read_exit_code()
+        coverage_reward = self.idf.reward(bitmap)
+        valid = exit_code == 0
+        if valid:
+            reward = coverage_reward
+            reason = "valid"
+        else:
+            penalty = (
+                self.missing_exit_penalty
+                if exit_code is None
+                else self.invalid_exit_penalty
+            )
+            reward = self.invalid_coverage_scale * coverage_reward - penalty
+            reason = "missing_exit_code" if exit_code is None else "nonzero_exit"
+
+        return RewardResult(
+            reward=reward,
+            coverage_reward=coverage_reward,
+            exit_code=exit_code,
+            valid=valid,
+            reward_reason=reason,
+            novelty_score=coverage_reward,
+            crash=exit_code is None,
+            timeout=None,
+        )
+
+    def _trace_bitmap(self) -> np.ndarray:
+        if self._trace_bits_view is None:
+            self._trace_bits_view = attach_trace_bits(self.bitmap_size)
+        return self._trace_bits_view.copy()
+
+    def clear_exit_code(self) -> None:
+        """Remove stale exit-code output before/after a child execution."""
+        try:
+            os.remove(self.exit_code_path)
+        except FileNotFoundError:
+            pass
+
+    def _read_exit_code(self) -> int | None:
+        """Read and clear the exit code written by exit_hook.so."""
+        try:
+            with open(self.exit_code_path) as fh:
+                return int(fh.read().strip())
+        except (OSError, ValueError):
+            return None
+        finally:
+            self.clear_exit_code()
 
 
 # ---------------------------------------------------------------------------

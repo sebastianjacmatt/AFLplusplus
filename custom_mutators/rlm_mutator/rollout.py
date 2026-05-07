@@ -29,6 +29,8 @@ from typing import Callable, Optional
 import torch
 from torch.utils.data import Dataset, Sampler
 
+from rewarding import RewardResult
+
 
 # ---------------------------------------------------------------------------
 # RolloutBuffer — written by mutator.fuzz_one() and mutator.on_post_run()
@@ -79,15 +81,11 @@ class RolloutBuffer:
     def patch_reward(
         self,
         sample_id:       str,
-        reward:          float,
-        coverage_reward: Optional[float] = None,
-        exit_code:       Optional[int]   = None,
+        reward_result:   RewardResult,
     ) -> None:
         rec = self._records.get(sample_id)
         if rec is not None:
-            rec["reward"]          = reward
-            rec["coverage_reward"] = coverage_reward
-            rec["exit_code"]       = exit_code
+            rec.update(reward_result.as_record_fields())
 
     def flush(self) -> list[dict]:
         """Return all rewarded records, log them once, and clear the store."""
@@ -110,9 +108,8 @@ class RolloutLogger:
 
     _CSV_HEADER = (
         "finetune_id", "sample_id", "group_id", "reward",
-        "coverage_reward", "exit_code", "log_prob", "ref_log_prob",
-        "executed_program_path",
-    )
+        "log_prob", "ref_log_prob", "executed_program_path",
+    ) + RewardResult.diagnostic_field_names()
 
     def __init__(
         self,
@@ -143,17 +140,17 @@ class RolloutLogger:
                 writer.writerow(self._CSV_HEADER)
             for r in records:
                 artifact_paths = self._write_rollout_artifacts(finetune_id, r)
-                writer.writerow((
+                row = [
                     finetune_id,
                     r["sample_id"],
                     r["group_id"],
                     r["reward"],
-                    _csv_opt(r.get("coverage_reward")),
-                    _csv_opt(r.get("exit_code")),
                     r["log_prob"],
                     _csv_opt(r.get("ref_log_prob")),
                     artifact_paths["executed_program_path"],
-                ))
+                ]
+                row.extend(_csv_opt(r.get(name)) for name in RewardResult.diagnostic_field_names())
+                writer.writerow(row)
 
         if self.log_fn is not None:
             self.log_fn(_rollout_scalars(finetune_id, records))

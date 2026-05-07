@@ -5,11 +5,11 @@
 This module is intentionally thin. It owns only:
 
     - AFL++ hook callbacks: init, deinit, queue_get, fuzz_count, fuzz, post_run
-    - SHM attachment and TF-IDF reward assembly
-    - Exit-code recovery via exit_hook.so output file
+    - Rewarder construction and exit-code path setup
     - Finetune scheduling based on queue_get cadence
 
 Mutation logic lives in mutator.py.
+Reward observation/shaping lives in rewarding.py.
 Model ownership lives in base_trainer.py and its PPO/GRPO subclasses.
 """
 
@@ -22,7 +22,7 @@ from typing import Optional
 
 from config import AFLConfig, ModelConfig, TrainingConfig, load_config
 from mutator import Mutator
-from rewarding import OnlineIDF, attach_trace_bits
+from rewarding import CoverageRewarder, OnlineIDF
 from rollout import RolloutBuffer, RolloutLogger
 
 logging.basicConfig(
@@ -40,24 +40,13 @@ log = logging.getLogger(__name__)
 TRAINER: Optional[object] = None
 BUFFER: Optional[RolloutBuffer] = None
 MUTATOR: Optional[Mutator] = None
-IDF: Optional[OnlineIDF] = None
+REWARDER: Optional[CoverageRewarder] = None
 MODEL_CFG: Optional[ModelConfig] = None
 AFL_CFG: Optional[AFLConfig] = None
 TRAIN_CFG: Optional[TrainingConfig] = None
 
-_trace_bits_view = None
-_exit_code_path: Optional[str] = None
 _queue_get_count: int = 0
 _finetune_pending: bool = False
-
-# post_run diagnostics: tally exit-code outcomes so we can verify the hook
-# pipeline without a per-call log flood. Summaries emit every N post_runs.
-_post_run_calls: int = 0
-_exit_hits:      int = 0
-_exit_miss:      int = 0
-_exit_code_hist: dict[int, int] = {}
-_POST_RUN_LOG_EVERY: int = 256
-
 
 # ---------------------------------------------------------------------------
 # Trainer resolution
@@ -91,8 +80,8 @@ def _resolve_trainer_cls(algorithm: str):
 
 def init(seed: int) -> None:
     """Called once when AFL++ starts the Python custom mutator."""
-    global TRAINER, BUFFER, MUTATOR, IDF, MODEL_CFG, AFL_CFG, TRAIN_CFG
-    global _trace_bits_view, _exit_code_path, _queue_get_count, _finetune_pending
+    global TRAINER, BUFFER, MUTATOR, REWARDER, MODEL_CFG, AFL_CFG, TRAIN_CFG
+    global _queue_get_count, _finetune_pending
 
     MODEL_CFG, AFL_CFG, TRAIN_CFG = load_config()
     random.seed(seed)
@@ -106,16 +95,26 @@ def init(seed: int) -> None:
     )
     BUFFER = RolloutBuffer(logger=rollout_logger)
     MUTATOR = Mutator(TRAINER, BUFFER, AFL_CFG, TRAIN_CFG)
-    IDF = OnlineIDF(bitmap_size=AFL_CFG.bitmap_size, alpha=AFL_CFG.idf_alpha)
-
     # Prefer RLM_EXIT_FILE from the shell wrapper — it's guaranteed to be in
     # AFL's env before the forkserver starts. Fall back to a /tmp path only
     # when unset (e.g. when running outside run_afl.sh).
-    _exit_code_path = os.environ.get("RLM_EXIT_FILE")
-    if not _exit_code_path:
-        _exit_code_path = f"/tmp/rlm_exit_{os.getpid()}"
-        os.environ["RLM_EXIT_FILE"] = _exit_code_path
-        log.warning("[rlm] RLM_EXIT_FILE not set by shell; using fallback %s", _exit_code_path)
+    exit_code_path = os.environ.get("RLM_EXIT_FILE")
+    if not exit_code_path:
+        exit_code_path = f"/tmp/rlm_exit_{os.getpid()}"
+        os.environ["RLM_EXIT_FILE"] = exit_code_path
+        log.warning("[rlm] RLM_EXIT_FILE not set by shell; using fallback %s", exit_code_path)
+
+    REWARDER = CoverageRewarder(
+        idf = OnlineIDF(
+            bitmap_size=AFL_CFG.bitmap_size,
+            alpha=AFL_CFG.idf_alpha,
+        ),
+        bitmap_size = AFL_CFG.bitmap_size,
+        exit_code_path = exit_code_path,
+        invalid_coverage_scale = AFL_CFG.invalid_coverage_scale,
+        invalid_exit_penalty   = AFL_CFG.invalid_exit_penalty,
+        missing_exit_penalty   = AFL_CFG.missing_exit_penalty,
+    )
 
     _queue_get_count = 0
     _finetune_pending = False
@@ -184,10 +183,10 @@ def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
     """Generate one mutation through Mutator and return bytes to AFL++."""
     del add_buf
 
-    if MUTATOR is None:
+    if MUTATOR is None or REWARDER is None:
         raise RuntimeError("fuzz() called before init()")
 
-    _clear_exit_code_file()
+    REWARDER.clear_exit_code()
     out = MUTATOR.fuzz_one(max_size)
     return out
 
@@ -195,92 +194,8 @@ def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
 
 def post_run() -> None:
     """Assemble scalar reward from bitmap novelty and exit status."""
-    global _trace_bits_view
-    global _post_run_calls, _exit_hits, _exit_miss
-
-    if MUTATOR is None or IDF is None:
+    if MUTATOR is None or REWARDER is None:
         raise RuntimeError("post_run() called before init()")
 
-    if _trace_bits_view is None:
-        if AFL_CFG is None:
-            raise RuntimeError("post_run() called before AFL config is available")
-        _trace_bits_view = attach_trace_bits(AFL_CFG.bitmap_size)
-
-    bitmap = _trace_bits_view.copy()
-    cov_reward = IDF.reward(bitmap)  # always updates IDF state
-
-    exit_code = _read_exit_code()
-    reward = _shape_reward(cov_reward, exit_code)
-    MUTATOR.on_post_run(reward, coverage_reward=cov_reward, exit_code=exit_code)
-
-    _post_run_calls += 1
-    if exit_code is None:
-        _exit_miss += 1
-    else:
-        _exit_hits += 1
-        _exit_code_hist[exit_code] = _exit_code_hist.get(exit_code, 0) + 1
-
-    if _post_run_calls % _POST_RUN_LOG_EVERY == 0:
-        hit_rate = _exit_hits / _post_run_calls if _post_run_calls else 0.0
-        log.info(
-            "[rlm] post_run tally: calls=%d hits=%d miss=%d hit_rate=%.2f hist=%s last(code=%s reward=%.4f cov=%.4f)",
-            _post_run_calls, _exit_hits, _exit_miss, hit_rate,
-            dict(sorted(_exit_code_hist.items())),
-            exit_code, reward, cov_reward,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Exit-code helper
-# ---------------------------------------------------------------------------
-
-def _read_exit_code() -> int | None:
-    """Read the exit code written by exit_hook.so to RLM_EXIT_FILE.
-
-    Returns None when the file is absent or unreadable, which is treated as a
-    crash / abnormal termination by post_run().
-    """
-    if _exit_code_path is None:
-        return None
-    try:
-        with open(_exit_code_path) as fh:
-            return int(fh.read().strip())
-    except (OSError, ValueError):
-        return None
-    finally:
-        _clear_exit_code_file()
-
-
-def _clear_exit_code_file() -> None:
-    """Remove any stale exit-code file before/after a child execution."""
-    if _exit_code_path is None:
-        return
-    try:
-        os.remove(_exit_code_path)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        log.warning("[rlm] failed to remove exit-code file %s: %s", _exit_code_path, exc)
-
-
-def _shape_reward(cov_reward: float, exit_code: int | None) -> float:
-    """Preserve some coverage signal even for invalid executions.
-
-    A hard gate to -1.0 collapses most invalid samples onto one reward, which
-    kills GRPO group variance. Instead:
-      - valid executions keep the full coverage reward
-      - invalid executions keep a scaled coverage component minus a penalty
-      - missing exit codes receive a slightly larger penalty
-    """
-    if AFL_CFG is None:
-        raise RuntimeError("_shape_reward() called before AFL config is available")
-
-    if exit_code == 0:
-        return cov_reward
-
-    penalty = (
-        AFL_CFG.missing_exit_penalty
-        if exit_code is None
-        else AFL_CFG.invalid_exit_penalty
-    )
-    return AFL_CFG.invalid_coverage_scale * cov_reward - penalty
+    reward_result = REWARDER.compute()
+    MUTATOR.on_post_run(reward_result)
