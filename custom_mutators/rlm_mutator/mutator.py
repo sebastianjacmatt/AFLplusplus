@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from config   import AFLConfig, TrainingConfig
 from rollout  import RolloutBuffer, RolloutDataset
 from masking  import CodeT5MaskedProgram, CodeT5SpanMasker
-from rewarding import RewardResult
+from rewarding import RewardResult, Rewarder
 from base_trainer import BaseTrainer
 
 log = logging.getLogger(__name__)
@@ -183,12 +183,19 @@ class Mutator:
             )
         self._pending_sample_id = None
 
-    def maybe_finetune(self) -> None:
-        """Drain the rollout buffer and run one trainer.train() cycle."""
+    def maybe_finetune(self, rewarder: Rewarder) -> None:
+        """Drain the rollout buffer and run one trainer.train() cycle.
+
+        Advances the TF-IDF cycle (CovRL Eq. 6: blends accumulated DF into
+        IDF_t) before training, so the next collection phase scores against
+        the refreshed snapshot. Rewards already in the buffer were produced
+        under IDF_{t-1} and are not recomputed.
+        """
         records = self.buffer.flush()
         if not records:
             log.info("[mutator] maybe_finetune — buffer empty, skipping")
             return
+        rewarder.tf_idf.update_cycle()
         dataset = RolloutDataset(records)
         self.trainer.set_rollout_dataset(dataset)
         self.trainer.train()                        # HF Trainer rebuilds optimizer each call

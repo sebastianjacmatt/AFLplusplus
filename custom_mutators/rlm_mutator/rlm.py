@@ -22,7 +22,7 @@ from typing import Optional
 
 from config import AFLConfig, ModelConfig, TrainingConfig, load_config
 from mutator import Mutator
-from rewarding import CoverageRewarder, OnlineIDF
+from rewarding import ExitCodeRewarder, Rewarder, TFIDFCoverageRewarder
 from rollout import RolloutBuffer, RolloutLogger
 
 logging.basicConfig(
@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 TRAINER: Optional[object] = None
 BUFFER: Optional[RolloutBuffer] = None
 MUTATOR: Optional[Mutator] = None
-REWARDER: Optional[CoverageRewarder] = None
+REWARDER: Optional[Rewarder] = None
 MODEL_CFG: Optional[ModelConfig] = None
 AFL_CFG: Optional[AFLConfig] = None
 TRAIN_CFG: Optional[TrainingConfig] = None
@@ -104,13 +104,14 @@ def init(seed: int) -> None:
         os.environ["RLM_EXIT_FILE"] = exit_code_path
         log.warning("[rlm] RLM_EXIT_FILE not set by shell; using fallback %s", exit_code_path)
 
-    REWARDER = CoverageRewarder(
-        idf = OnlineIDF(
-            bitmap_size=AFL_CFG.bitmap_size,
-            alpha=AFL_CFG.idf_alpha,
+    REWARDER = Rewarder(
+        tf_idf = TFIDFCoverageRewarder(
+            bitmap_size = AFL_CFG.bitmap_size,
+            alpha       = AFL_CFG.idf_alpha,
         ),
-        bitmap_size = AFL_CFG.bitmap_size,
-        exit_code_path = exit_code_path,
+        exit_code = ExitCodeRewarder(
+            exit_code_path = exit_code_path,
+        ),
         invalid_coverage_scale = AFL_CFG.invalid_coverage_scale,
         invalid_exit_penalty   = AFL_CFG.invalid_exit_penalty,
         missing_exit_penalty   = AFL_CFG.missing_exit_penalty,
@@ -172,7 +173,9 @@ def fuzz_count(buf: bytearray) -> int:
 
     if _finetune_pending:
         _finetune_pending = False
-        MUTATOR.maybe_finetune()
+        # maybe_finetune advances the IDF snapshot (CovRL Eq. 6) before training,
+        # so the next collection phase scores against IDF_t.
+        MUTATOR.maybe_finetune(REWARDER)
 
     MUTATOR.on_new_seed(buf)
     return AFL_CFG.fuzz_count
@@ -193,9 +196,16 @@ def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
 
 
 def post_run() -> None:
-    """Assemble scalar reward from bitmap novelty and exit status."""
+    """Compute reward and fold the execution into TF-IDF DF.
+
+    TF * IDF_{t-1} is computed against the snapshot rolled forward by the
+    previous maybe_finetune cycle. The bitmap is also folded into DF —
+    every executed input counts as a corpus document, the cheap online
+    approximation of CovRL's "DF over saved seeds" semantics.
+    """
     if MUTATOR is None or REWARDER is None:
         raise RuntimeError("post_run() called before init()")
 
     reward_result = REWARDER.compute()
+    REWARDER.tf_idf.observe_last_seed()
     MUTATOR.on_post_run(reward_result)

@@ -2,7 +2,7 @@
 
 Three classes feed the HF Trainer from the AFL++ mutation loop:
 
-    RolloutBuffer    — two-phase in-memory store (log → patch_reward → flush/log)
+    RolloutBuffer    — two-phase in-memory store (log → patch_reward → flush)
     RolloutDataset   — torch Dataset over a flushed record list
     RolloutCollator  — pads and stacks records into batched tensors
 
