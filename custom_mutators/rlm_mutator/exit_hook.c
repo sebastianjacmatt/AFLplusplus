@@ -152,10 +152,37 @@ static void exit_hook_init(void) {
      * Jerry's "Unhandled exception: SyntaxError | ReferenceError | ..."
      * messages and apply CovRL Eq. 2's 3-way validity reward instead of
      * the binary exit-code gate. Done last in the constructor so any
-     * earlier WARNING write to fd 2 still reaches AFL's normal stderr. */
+     * earlier WARNING write to fd 2 still reaches AFL's normal stderr.
+     *
+     * O_APPEND is critical: this constructor only fires once in the
+     * forkserver process. Children inherit the resulting fd and share
+     * its offset, so without O_APPEND, post_run-side truncates would
+     * leave the next child writing at a stale offset and producing a
+     * sparse (zero-padded) prefix. With O_APPEND, every write seeks to
+     * EOF first — after a Python-side truncate that's offset 0, giving
+     * us per-execution stderr content cleanly. */
     const char *spath = getenv("RLM_STDERR_FILE");
+    int slfd = open("/tmp/exit_hook.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (slfd >= 0) {
+        char sbuf[256];
+        int sn = snprintf(sbuf, sizeof(sbuf),
+                          "stderr_redirect pid=%d RLM_STDERR_FILE=%s\n",
+                          (int) getpid(), spath ? spath : "(unset)");
+        if (sn > 0) { ssize_t w = write(slfd, sbuf, (size_t) sn); (void) w; }
+        close(slfd);
+    }
     if (spath) {
-        int sfd = open(spath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        int sfd = open(spath, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0600);
+        int e   = errno;
+        int slfd2 = open("/tmp/exit_hook.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (slfd2 >= 0) {
+            char sbuf[256];
+            int sn = snprintf(sbuf, sizeof(sbuf),
+                              "stderr_open pid=%d sfd=%d errno=%d\n",
+                              (int) getpid(), sfd, sfd >= 0 ? 0 : e);
+            if (sn > 0) { ssize_t w = write(slfd2, sbuf, (size_t) sn); (void) w; }
+            close(slfd2);
+        }
         if (sfd >= 0) {
             dup2(sfd, STDERR_FILENO);
             close(sfd);

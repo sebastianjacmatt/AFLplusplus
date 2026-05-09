@@ -261,8 +261,11 @@ class StderrValidityRewarder(AbstractRewarder):
             return ""
 
     def clear(self) -> None:
+        """Truncate (don't unlink) so the forkserver-side fd keeps writing
+        to the same inode. Unlinking the path leaves the next child's
+        writes orphaned in a ghost inode that Python can no longer read."""
         try:
-            os.remove(self.stderr_path)
+            os.truncate(self.stderr_path, 0)
         except FileNotFoundError:
             pass
 
