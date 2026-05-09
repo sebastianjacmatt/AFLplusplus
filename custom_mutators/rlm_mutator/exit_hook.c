@@ -147,6 +147,20 @@ static void exit_hook_init(void) {
     sigaction(SIGILL,  &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGPIPE, &sa, NULL);
+
+    /* Redirect fd 2 to RLM_STDERR_FILE so the Python side can classify
+     * Jerry's "Unhandled exception: SyntaxError | ReferenceError | ..."
+     * messages and apply CovRL Eq. 2's 3-way validity reward instead of
+     * the binary exit-code gate. Done last in the constructor so any
+     * earlier WARNING write to fd 2 still reaches AFL's normal stderr. */
+    const char *spath = getenv("RLM_STDERR_FILE");
+    if (spath) {
+        int sfd = open(spath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (sfd >= 0) {
+            dup2(sfd, STDERR_FILENO);
+            close(sfd);
+        }
+    }
 }
 
 void exit(int code) {

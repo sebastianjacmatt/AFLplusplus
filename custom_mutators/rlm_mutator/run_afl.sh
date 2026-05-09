@@ -71,6 +71,7 @@ export AFL_PYTHON_MODULE=rlm
 export AFL_CUSTOM_MUTATOR_ONLY=1
 export AFL_PRELOAD="$EXIT_HOOK_SO"
 export RLM_EXIT_FILE="$OUT_DIR/rlm_exit"
+export RLM_STDERR_FILE="$OUT_DIR/rlm_stderr"
 
 if [ -n "$CONFIG" ]; then
   export RLM_CONFIG="$CONFIG"

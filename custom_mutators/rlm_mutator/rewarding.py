@@ -65,13 +65,14 @@ class RewardResult:
     """
 
     reward: float
-    coverage_reward: float | None = None      # raw TF-IDF, ungated by exit code
+    coverage_reward: float | None = None      # raw TF-IDF, ungated by validity
     exit_code: int | None = None
     valid: bool = False
     reward_reason: str | None = None
     novelty_score: float | None = None
     crash: bool | None = None
     timeout: bool | None = None
+    validity: str | None = None               # 'syntax' | 'semantic' | 'valid' | None
 
     def as_record_fields(self) -> dict:
         return asdict(self)
@@ -90,6 +91,7 @@ class ExecutionObservation:
 
     bitmap: np.ndarray | None = None
     exit_code: int | None = None
+    validity: str | None = None    # 'syntax' | 'semantic' | 'valid' | None
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +162,107 @@ class ExitCodeRewarder(AbstractRewarder):
         """Remove any stale exit-code output before/after a child execution."""
         try:
             os.remove(self.exit_code_path)
+        except FileNotFoundError:
+            pass
+
+
+class StderrValidityRewarder(AbstractRewarder):
+    """3-way validity classification from the target's stderr text.
+
+    CovRL Eq. 2 splits the validity branch by error kind:
+
+        r(W*) = -1.0    if W* triggered a syntax error
+              = -0.5    if W* triggered a semantic error (reference, type, range, URI)
+              = +R_cov  if W* passed cleanly
+
+    JS engines like Jerry print the error class to stderr ("Unhandled exception:
+    SyntaxError", "Unhandled exception: ReferenceError", ...). ``exit_hook.so``
+    redirects fd 2 to ``stderr_path`` per forked execution, so reading that file
+    after the run gives us the engine's textual classification.
+
+    @param stderr_path:     File written by exit_hook.so's stderr redirect.
+    @param syntax_reward:   Reward when stderr contains a syntax-error marker.
+    @param semantic_reward: Reward when stderr contains a runtime-error marker.
+    @param valid_reward:    Reward when stderr is empty (program ran cleanly).
+                            For a composite use, this is just a sentinel — the
+                            composite usually swaps in R_cov instead.
+    @param max_bytes:       Cap reads at this many bytes; we only need to
+                            substring-match, no engine prints more for an error.
+    """
+
+    SYNTAX_MARKERS:   tuple[str, ...] = ("SyntaxError",)
+    SEMANTIC_MARKERS: tuple[str, ...] = (
+        "ReferenceError", "TypeError", "RangeError", "URIError", "EvalError",
+    )
+
+    def __init__(
+        self,
+        stderr_path:     str,
+        syntax_reward:   float = -1.0,
+        semantic_reward: float = -0.5,
+        valid_reward:    float = 0.0,
+        max_bytes:       int   = 4096,
+    ) -> None:
+        self.stderr_path     = stderr_path
+        self.syntax_reward   = syntax_reward
+        self.semantic_reward = semantic_reward
+        self.valid_reward    = valid_reward
+        self.max_bytes       = max_bytes
+
+    @classmethod
+    def classify(cls, stderr_text: str | None) -> str | None:
+        """Map a stderr buffer to a validity class.
+
+        Returns 'syntax' / 'semantic' / 'valid' on a definitive read, or
+        ``None`` when the stderr file was missing/unreadable so the caller
+        can fall back to exit-code semantics.
+        """
+        if stderr_text is None:
+            return None
+        if any(m in stderr_text for m in cls.SYNTAX_MARKERS):
+            return "syntax"
+        if any(m in stderr_text for m in cls.SEMANTIC_MARKERS):
+            return "semantic"
+        if stderr_text.strip() == "":
+            return "valid"
+        # Non-empty stderr without a known marker — could be debug prints,
+        # warnings, or unrecognised errors. Conservative: treat as semantic.
+        return "semantic"
+
+    def result(self, obs: ExecutionObservation) -> float:
+        cls_ = obs.validity
+        if cls_ == "syntax":
+            return self.syntax_reward
+        if cls_ == "semantic":
+            return self.semantic_reward
+        if cls_ == "valid":
+            return self.valid_reward
+        # Unknown — caller should already have fallen back; return semantic
+        # as a safe non-zero penalty.
+        return self.semantic_reward
+
+    def read(self) -> str | None:
+        """Read and clear the stderr file written by exit_hook.so's redirect.
+
+        Returns the stderr text (capped at ``max_bytes``), or ``None`` when
+        the file does not exist (LD_PRELOAD didn't fire, or the env var was
+        unset). The file is always cleared so the next execution starts fresh.
+        """
+        try:
+            with open(self.stderr_path, "rb") as fh:
+                data = fh.read(self.max_bytes)
+        except OSError:
+            return None
+        finally:
+            self.clear()
+        try:
+            return data.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def clear(self) -> None:
+        try:
+            os.remove(self.stderr_path)
         except FileNotFoundError:
             pass
 
@@ -340,66 +443,91 @@ class Rewarder:
 
     Holds no IO and no per-execution buffers — those live on the
     sub-rewarders that own them (``TFIDFCoverageRewarder`` for the SHM
-    bitmap, ``ExitCodeRewarder`` for the exit-code file). This class
-    only collapses CovRL Eq. 2 to the binary-validity form supported by
-    our exit-code-only setup:
+    bitmap, ``ExitCodeRewarder`` for the exit-code file,
+    ``StderrValidityRewarder`` for the stderr-text file). This class only
+    encodes CovRL Eq. 2:
 
-        reward = R_cov     if exit_code == 0
-               = -1.0      otherwise (non-zero or missing)
+        reward = -1.0    if SyntaxError    (parse failure)
+               = -0.5    if semantic error (ReferenceError / TypeError / ...)
+               = +R_cov  if program ran cleanly to completion
 
-    :meth:`compute` is the single entry point. With ``obs is None``
-    (the live fuzzing path) the sub-rewarders read live state —
-    ``tf_idf.snapshot_bitmap()`` from SHM and ``exit_code.read()`` from
-    the exit-code file written by ``exit_hook.so``. With ``obs`` supplied
-    it scores a pre-captured observation, leaving room for an offline
-    rescoring pass without changing the API.
+    Validity is decided from the engine's stderr text (Jerry / V8 / Spider-
+    Monkey all print "SyntaxError" / "ReferenceError" / etc. on the error
+    branch). When the stderr file is unavailable (LD_PRELOAD didn't fire,
+    env var unset) the aggregator falls back to the binary exit-code path
+    so older configurations remain operational.
+
+    :meth:`compute` is the single entry point. With ``obs is None`` it
+    reads live state from each sub-rewarder. With ``obs`` supplied it
+    scores a pre-captured observation, leaving room for an offline pass.
 
     @param tf_idf:    Coverage rewarder; produces ``coverage_reward`` (R_cov).
-    @param exit_code: Validity-proxy rewarder; ``invalid_reward`` (default
-                      -1.0) is used as the blanket penalty for any non-zero
-                      or missing exit.
+    @param exit_code: Owns the exit-code file. Used both as a fallback when
+                      stderr classification is unavailable, and as the
+                      ``valid`` cross-check (a clean run must also exit 0).
+    @param validity:  Optional ``StderrValidityRewarder``. When wired,
+                      drives the 3-way Eq. 2 split; when ``None``, the
+                      aggregator collapses to the binary exit-code form.
     """
 
     def __init__(
         self,
         tf_idf:    TFIDFCoverageRewarder,
         exit_code: ExitCodeRewarder,
+        validity:  "StderrValidityRewarder | None" = None,
     ) -> None:
         self.tf_idf    = tf_idf
         self.exit_code = exit_code
+        self.validity  = validity
 
     def compute(self, obs: ExecutionObservation | None = None) -> RewardResult:
         """Score one execution; reads live state when ``obs`` is omitted."""
         if obs is None:
+            stderr_text = self.validity.read() if self.validity is not None else None
             obs = ExecutionObservation(
                 bitmap    = self.tf_idf.snapshot_bitmap(),
                 exit_code = self.exit_code.read(),
+                validity  = StderrValidityRewarder.classify(stderr_text),
             )
 
         cov_reward = self.tf_idf.result(obs)
-        valid      = obs.exit_code == 0
 
-        if valid:
-            reward = cov_reward
-            reason = "valid"
+        # Decide reward + reason from stderr if we have it; fall back to
+        # exit-code semantics otherwise. The "valid" branch always requires
+        # exit_code == 0 as a sanity cross-check.
+        if obs.validity == "syntax":
+            reward, reason, is_valid = -1.0, "syntax_error", False
+        elif obs.validity == "semantic":
+            reward, reason, is_valid = -0.5, "semantic_error", False
+        elif obs.validity == "valid" and obs.exit_code == 0:
+            reward, reason, is_valid = cov_reward, "valid", True
         else:
-            reward = self.exit_code.invalid_reward
-            reason = "missing_exit_code" if obs.exit_code is None else "nonzero_exit"
+            # No stderr file (None) or stderr-says-valid-but-exit-non-zero
+            # (defensive). Fall back to the binary exit-code path.
+            if obs.exit_code == 0:
+                reward, reason, is_valid = cov_reward, "valid", True
+            else:
+                reward = self.exit_code.invalid_reward
+                reason = "missing_exit_code" if obs.exit_code is None else "nonzero_exit"
+                is_valid = False
 
         return RewardResult(
             reward          = reward,
             coverage_reward = cov_reward,
             exit_code       = obs.exit_code,
-            valid           = valid,
+            valid           = is_valid,
             reward_reason   = reason,
             novelty_score   = cov_reward,
             crash           = obs.exit_code is None,
             timeout         = None,
+            validity        = obs.validity,
         )
 
     def clear_exit_code(self) -> None:
         """Pass-through for the AFL fuzz() pre-execution clear."""
         self.exit_code.clear()
+        if self.validity is not None:
+            self.validity.clear()
 
 
 # ---------------------------------------------------------------------------

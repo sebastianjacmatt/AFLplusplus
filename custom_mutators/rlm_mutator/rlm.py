@@ -22,7 +22,12 @@ from typing import Optional
 
 from config import AFLConfig, ModelConfig, TrainingConfig, load_config
 from mutator import Mutator
-from rewarding import ExitCodeRewarder, Rewarder, TFIDFCoverageRewarder
+from rewarding import (
+    ExitCodeRewarder,
+    Rewarder,
+    StderrValidityRewarder,
+    TFIDFCoverageRewarder,
+)
 from rollout import RolloutBuffer, RolloutLogger
 
 logging.basicConfig(
@@ -95,14 +100,20 @@ def init(seed: int) -> None:
     )
     BUFFER = RolloutBuffer(logger=rollout_logger)
     MUTATOR = Mutator(TRAINER, BUFFER, AFL_CFG, TRAIN_CFG)
-    # Prefer RLM_EXIT_FILE from the shell wrapper — it's guaranteed to be in
-    # AFL's env before the forkserver starts. Fall back to a /tmp path only
-    # when unset (e.g. when running outside run_afl.sh).
+    # Prefer RLM_EXIT_FILE / RLM_STDERR_FILE from the shell wrapper — they're
+    # guaranteed to be in AFL's env before the forkserver starts. Fall back to
+    # /tmp paths only when unset (e.g. when running outside run_afl.sh).
     exit_code_path = os.environ.get("RLM_EXIT_FILE")
     if not exit_code_path:
         exit_code_path = f"/tmp/rlm_exit_{os.getpid()}"
         os.environ["RLM_EXIT_FILE"] = exit_code_path
         log.warning("[rlm] RLM_EXIT_FILE not set by shell; using fallback %s", exit_code_path)
+
+    stderr_path = os.environ.get("RLM_STDERR_FILE")
+    if not stderr_path:
+        stderr_path = f"/tmp/rlm_stderr_{os.getpid()}"
+        os.environ["RLM_STDERR_FILE"] = stderr_path
+        log.warning("[rlm] RLM_STDERR_FILE not set by shell; using fallback %s", stderr_path)
 
     REWARDER = Rewarder(
         tf_idf = TFIDFCoverageRewarder(
@@ -111,6 +122,9 @@ def init(seed: int) -> None:
         ),
         exit_code = ExitCodeRewarder(
             exit_code_path = exit_code_path,
+        ),
+        validity = StderrValidityRewarder(
+            stderr_path = stderr_path,
         ),
     )
 
