@@ -157,6 +157,18 @@ class Mutator:
 
 
         sample_id = self.buffer.new_sample_id()
+        # Diagnostic: log first 8 sampled tokens per fuzz_one. Within a GRPO group
+        # all samples share x_t, so identical y_t prefixes across the group point
+        # at sampling collapse (model too peaky / RNG not advancing); diverging
+        # y_t with identical executed_program bytes points at tokenizer-decode
+        # collapse. Cheap to leave in; trim or move to debug level once stable.
+        log.info(
+            "[mut] %s group=%d logp=%.3f y_t[:8]=%s",
+            sample_id,
+            self._group,
+            result.old_logprob,
+            result.y_t[:8],
+        )
         self.buffer.log(
             sample_id        = sample_id,
             group_id         = self._group,

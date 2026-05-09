@@ -72,29 +72,21 @@ class ModelConfig:
         default=5,
         metadata={"help": "Maximum corrupted span length for CodeT5 masked span prediction."},
     )
-    sample_method: Literal["greedy", "contrastive", "sampling"] = field(
-        default="sampling",
-        metadata={"help": "Generation strategy: 'greedy', 'contrastive', or 'sampling' (multinomial). GRPO requires 'sampling' for intra-group diversity."},
-    )
     top_k: int = field(
         default=50,
-        metadata={"help": "top-k for contrastive/sampling (ignored for greedy)."},
+        metadata={"help": "top-k filter for multinomial sampling (0 disables)."},
     )
     top_p: float = field(
         default=0.95,
-        metadata={"help": "nucleus sampling threshold (sampling mode only)."},
+        metadata={"help": "Nucleus-sampling threshold for multinomial sampling."},
     )
     temperature: float = field(
         default=1.0,
-        metadata={"help": "softmax temperature for multinomial sampling."},
+        metadata={"help": "Softmax temperature for multinomial sampling."},
     )
     max_new_tokens_per_mask: int = field(
         default=16,
         metadata={"help": "Maximum generated tokens allowed per masked span prediction."},
-    )
-    penalty_alpha: float = field(
-        default=0.6,
-        metadata={"help": "Degeneration penalty alpha for contrastive search."},
     )
 
     def resolve_device(self) -> str:
@@ -347,28 +339,12 @@ def load_config(
             f"AFLConfig.mask_count ({afl_cfg.mask_count}) must be >= 1."
         )
 
-    if model_cfg.sample_method == "contrastive":
-        if model_cfg.penalty_alpha <= 0.0:
-            raise ValueError(
-                "ModelConfig.penalty_alpha must be > 0 when sample_method='contrastive'."
-            )
-        if model_cfg.top_k <= 1:
-            raise ValueError(
-                "ModelConfig.top_k must be > 1 when sample_method='contrastive'."
-            )
-
     # Attach algorithm sub-config — flat JSON keys like "group_size" are
     # picked up here, since HfArgumentParser only parses the three top-level
     # dataclasses.
     if train_cfg.algorithm == "grpo":
         train_cfg.grpo = GRPOConfig(**_sub_kwargs(raw, GRPOConfig))
         train_cfg.ppo  = None
-        if model_cfg.sample_method != "sampling":
-            raise ValueError(
-                f"GRPO requires sample_method='sampling' for intra-group diversity; "
-                f"got '{model_cfg.sample_method}'. Deterministic decoding produces "
-                f"identical y_t for every sample in a group, collapsing the advantage."
-            )
         if train_cfg.train_batch_size % train_cfg.grpo.group_size != 0:
             raise ValueError(
                 f"TrainingConfig.train_batch_size ({train_cfg.train_batch_size}) must be a multiple of "
