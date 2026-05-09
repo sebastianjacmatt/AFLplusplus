@@ -112,9 +112,6 @@ def init(seed: int) -> None:
         exit_code = ExitCodeRewarder(
             exit_code_path = exit_code_path,
         ),
-        invalid_coverage_scale = AFL_CFG.invalid_coverage_scale,
-        invalid_exit_penalty   = AFL_CFG.invalid_exit_penalty,
-        missing_exit_penalty   = AFL_CFG.missing_exit_penalty,
     )
 
     _queue_get_count = 0

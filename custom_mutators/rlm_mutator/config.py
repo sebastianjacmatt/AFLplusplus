@@ -127,22 +127,6 @@ class AFLConfig:
         default="span",
         metadata={"help": "Masking strategy. 'span' is safer and closer to CodeT5 pretraining."},
     )
-    insert_mask_prob: float = field(
-        default=0.0,
-        metadata={"help": "Probability of creating an insertion hole instead of replacing an existing span."},
-    )
-    invalid_coverage_scale: float = field(
-        default=1.0,
-        metadata={"help": "How much coverage reward to preserve on non-zero exits."},
-    )
-    invalid_exit_penalty: float = field(
-        default=1.25,
-        metadata={"help": "Penalty subtracted from preserved coverage reward on non-zero exits."},
-    )
-    missing_exit_penalty: float = field(
-        default=1.5,
-        metadata={"help": "Penalty used when exit_hook did not report an exit code."},
-    )
     bitmap_size: int = field(
         default=65536,
         metadata={"help": "AFL++ coverage bitmap size in bytes (2^16 or 2^17)."},
@@ -361,26 +345,6 @@ def load_config(
     if afl_cfg.mask_count < 1:
         raise ValueError(
             f"AFLConfig.mask_count ({afl_cfg.mask_count}) must be >= 1."
-        )
-
-    if not 0.0 <= afl_cfg.insert_mask_prob <= 1.0:
-        raise ValueError(
-            f"AFLConfig.insert_mask_prob ({afl_cfg.insert_mask_prob}) must be in [0, 1]."
-        )
-
-    if afl_cfg.invalid_coverage_scale < 0.0:
-        raise ValueError(
-            f"AFLConfig.invalid_coverage_scale ({afl_cfg.invalid_coverage_scale}) must be >= 0."
-        )
-
-    if afl_cfg.invalid_exit_penalty < 0.0:
-        raise ValueError(
-            f"AFLConfig.invalid_exit_penalty ({afl_cfg.invalid_exit_penalty}) must be >= 0."
-        )
-
-    if afl_cfg.missing_exit_penalty < 0.0:
-        raise ValueError(
-            f"AFLConfig.missing_exit_penalty ({afl_cfg.missing_exit_penalty}) must be >= 0."
         )
 
     if model_cfg.sample_method == "contrastive":

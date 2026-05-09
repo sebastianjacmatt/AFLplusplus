@@ -10,6 +10,10 @@ we are interested in the following metrics
 - coverage
 - error rate
 
+Additional important metrics 
+- execution rate
+- video memory usage
+
 ## Mutator 
 The reinforcement learning langauge model(rllm) mutator works by takning a program $z$ representing it as a set of tokens $w$ and masking a given span(ref;codet5) of those tokens. The bandit then infills this span with a given policy $\pi_{\theta}(y|x)$ where $y$ is some infilled sequence whilst $x$ is some masked program. rllm then encodes the program back into byte representation $z'$ and executes on the target.
 
@@ -29,7 +33,7 @@ $$
 ### Validity signal: exit-code-as-bug-oracle
 
 The `validity` component of $R(z')$ is derived from the engine subprocess's
-exit code. This is not an arbitrary choice — it is the established
+exit code. This is not an arbitrary choice, it is the established
 cross-fuzzer convention, and we anchor our methodology in it explicitly.
 
 #### In-repo precedent
@@ -146,6 +150,33 @@ for $z'$ with exit code $0$.
 
 --todo; we should initialize exit code to recive neutral rewards on specific exit codes denoted by sanatizers-- 
 
+#### Validity signal — exit-code semantics
+
+We do not rely on a per-engine claim that "exit code 0 means success in
+this JavaScript engine". We rely on a stronger, language-level guarantee.
+C99 §7.22.4.4 and POSIX.
+
+The glibc manual formalises:
+https://sourceware.org/glibc/manual/latest/html_mono/libc.html#Exit-Status-1.
+
+JavaScript engine shells (`d8`, `jsc`, `js`, `qjs`, `jerry`, …) are C/C++
+programs. Their `main()` returns `0` on clean exit, conformant to the C language standard.
+There are incentives in providing a more fine grained reward signal for validity, mainly better rewards.
+
+AFL++ reserve additional non-zero codes for sub-categories: `EXIT_FAILURE = 1` for ordinary errors,
+`MSAN_ERROR = 86`, `LSAN_ERROR = 23`
+([include/config.h:460-466](../../../include/config.h)), libFuzzer's
+`error_exitcode = 77` / `timeout_exitcode = 70`
+([FuzzerFlags.def:52-55](../../libfuzzer/FuzzerFlags.def)), and any
+user-set `AFL_CRASH_EXITCODE`
+([afl-forkserver.c:2391-2415](../../../src/afl-forkserver.c)). For our
+validity signal we therefore use the *binary* distinction
+$e_t = \mathrm{0}$ vs $e_t \neq \mathrm{0}$, which
+is exactly what the C standard subsumes the finer-grained sanitizer/fuzzer conventions.
+
+The citation stack for the validity signal is:
+
+
 ## Finetuning
 
 During fuzzing we collect a rollout dataset containing $D=\{ x{_t},y{_t},\pi_{\theta}(y|x),z', \pi_{\theta_{ref}}(y|x),r \}$ along with identifiers for which group a sample belongs to.
@@ -189,3 +220,12 @@ D_{\mathrm{KL}}(\pi_\theta \| \pi_{\mathrm{ref}})
   - \log\frac{\pi_{\mathrm{ref}}(y_i \mid x)}{\pi_\theta(y_i \mid x)} - 1.
 $$
 
+## Citations
+
+| Claim | Citation |
+|---|---|
+| `EXIT_SUCCESS = 0` denotes successful termination; `EXIT_FAILURE` denotes unsuccessful termination | ISO/IEC 9899:1999 §7.22.4.4; POSIX `<stdlib.h>`; GNU C Library Manual, *Process Completion Status* / *Exit Status* (https://sourceware.org/glibc/manual/latest/html_mono/libc.html#Exit-Status-1). |
+| Bug oracle = function on the run outcome (wait-status) | Manès et al., *The Art, Science, and Engineering of Fuzzing: A Survey*, IEEE TSE 2019; IEEE Std 1003.1-2017 (POSIX), `wait(2)` — `WIFEXITED`, `WIFSIGNALED`, `WEXITSTATUS`, `WTERMSIG`. |
+| Sanitizer exit-code constants (86 / 23) | Serebryany, Bruening, Potapenko, Vyukov, *AddressSanitizer: A Fast Address Sanity Checker*, USENIX ATC 2012; Stepanov & Serebryany, *MemorySanitizer: fast detector of uninitialized memory use in C++*, CGO 2015. Constants documented at [docs/env_variables.md:1001-1022](../../../docs/env_variables.md) with `exit_code=86 (required for legacy reasons)`. |
+| Exit-code-as-oracle in libFuzzer | Serebryany, *Continuous Fuzzing with libFuzzer and AddressSanitizer*, IEEE SecDev 2016 + LLVM libFuzzer docs (https://llvm.org/docs/LibFuzzer.html); constants in [FuzzerFlags.def:52-55](../../libfuzzer/FuzzerFlags.def). |
+| AFL++'s configurable bug oracle (`AFL_CRASH_EXITCODE`) | Fioraldi, Maier, Eißfeldt, Heuse, *AFL++: Combining Incremental Steps of Fuzzing Research*, USENIX WOOT 2020. Implementation at [src/afl-forkserver.c:2391-2415](../../../src/afl-forkserver.c); user-facing semantics at [docs/env_variables.md:405-409](../../../docs/env_variables.md); historical introduction at [docs/Changelog.md:944](../../../docs/Changelog.md). |

@@ -14,7 +14,7 @@ The intended entry point is [run_afl.sh](/Users/sebastianmatthews/Documents/mast
 At a high level:
 
 1. AFL++ selects a seed.
-2. The mutator masks parts of the seed and asks the model to predict those spans.
+2. The mutator masks parts of the seed and asks the model to infill them.
 3. The mutator records:
    - the masked input `x_t`
    - the generated output `y_t`
@@ -27,8 +27,7 @@ At a high level:
 Relevant files:
 
 - [rlm.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/rlm.py:1): AFL++ hook entrypoint
-- [mutator.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/mutator.py:1): tokenization, masking, generation, finetune orchestration
-- [rollout.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/rollout.py:1): rollout buffering, logging, datasets, collation
+- [mutator.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/mutator.py:1): masking, generation, rollout logging
 - [grpo.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/grpo.py:1): GRPO loss
 - [base_trainer.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/base_trainer.py:1): HF trainer integration
 - [rewarding.py](/Users/sebastianmatthews/Documents/mast/AFLplusplus/custom_mutators/rlm_mutator/rewarding.py:1): online TF-IDF coverage reward
@@ -154,7 +153,7 @@ Important fields:
 
 - `algorithm`: should be `grpo`
 - `group_size`: GRPO group size
-- `train_batch_size`: must be a multiple of `group_size`
+- `train_batch_size`: must equal `group_size`
 - `fuzz_count`: must be divisible by `group_size`
 - `sample_method`: `greedy` or `contrastive`
 - `enable_logging`: enables trainer and rollout logging
@@ -272,9 +271,9 @@ Make sure the dataset exists at:
 ~/Documents/data_store/dataset/<dataset-name>
 ```
 
-### `TrainingConfig.train_batch_size must be a multiple of GRPOConfig.group_size`
+### `TrainingConfig.train_batch_size must equal GRPOConfig.group_size`
 
-Set `train_batch_size` to `group_size` or a whole-number multiple of it.
+Set `train_batch_size` and `group_size` to the same value in the config.
 
 ### `AFLConfig.fuzz_count must be divisible by GRPOConfig.group_size`
 

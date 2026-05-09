@@ -158,6 +158,53 @@ $$
 
 where $N_t$ is the total number of executions seen so far and $\alpha \in [0,1]$ is a momentum hyperparameter (default 0.6). The IDF update is applied unconditionally after every execution, including error runs, so that $W_t$ reflects the full coverage distribution and not only valid executions.
 
+#### Validity signal — exit-code semantics
+
+We do not rely on a per-engine claim that "exit code 0 means success in
+this JavaScript engine". We rely on a stronger, language-level guarantee.
+C99 §7.22.4.4 and POSIX define two macros in `<stdlib.h>`:
+
+- `EXIT_SUCCESS` — guaranteed equivalent to `0`; passed to `exit()` (or
+  returned from `main`) it denotes *successful termination* of the
+  program.
+- `EXIT_FAILURE` — implementation-defined, conventionally `1`; passed to
+  `exit()` it denotes *unsuccessful termination*.
+
+The glibc manual formalises both:
+https://sourceware.org/glibc/manual/latest/html_mono/libc.html#Exit-Status-1.
+
+JavaScript engine shells (`d8`, `jsc`, `js`, `qjs`, `jerry`, …) are C/C++
+programs. Their `main()` returns `EXIT_SUCCESS` (i.e. `0`) on clean
+termination because they are conformant C/C++ programs — the guarantee is
+inherited from the language standard, not from any engine-specific
+contract. We therefore never need to inspect a particular engine's source
+to argue "exit code 0 means success here".
+
+The reverse direction is deliberately weaker. The C standard guarantees
+`EXIT_FAILURE` is *one* unsuccessful-termination code, but real-world
+C/C++ programs — including AFL++ and libFuzzer — reserve additional
+non-zero codes for sub-categories: `EXIT_FAILURE = 1` for ordinary errors,
+`MSAN_ERROR = 86`, `LSAN_ERROR = 23`
+([include/config.h:460-466](../../../include/config.h)), libFuzzer's
+`error_exitcode = 77` / `timeout_exitcode = 70`
+([FuzzerFlags.def:52-55](../../libfuzzer/FuzzerFlags.def)), and any
+user-set `AFL_CRASH_EXITCODE`
+([afl-forkserver.c:2391-2415](../../../src/afl-forkserver.c)). For our
+validity signal we therefore use the *binary* distinction
+$e_t = \mathrm{EXIT\_SUCCESS}$ vs $e_t \neq \mathrm{EXIT\_SUCCESS}$, which
+is exactly what the C standard underwrites and which subsumes the
+finer-grained sanitizer/fuzzer conventions.
+
+The citation stack for the validity signal is:
+
+| Claim | Citation |
+|---|---|
+| `EXIT_SUCCESS = 0` denotes successful termination; `EXIT_FAILURE` denotes unsuccessful termination | ISO/IEC 9899:1999 §7.22.4.4; POSIX `<stdlib.h>`; GNU C Library Manual, *Process Completion Status* / *Exit Status* (https://sourceware.org/glibc/manual/latest/html_mono/libc.html#Exit-Status-1). |
+| Bug oracle = function on the run outcome (wait-status) | Manès et al., *The Art, Science, and Engineering of Fuzzing: A Survey*, IEEE TSE 2019; IEEE Std 1003.1-2017 (POSIX), `wait(2)` — `WIFEXITED`, `WIFSIGNALED`, `WEXITSTATUS`, `WTERMSIG`. |
+| Sanitizer exit-code constants (86 / 23) | Serebryany, Bruening, Potapenko, Vyukov, *AddressSanitizer: A Fast Address Sanity Checker*, USENIX ATC 2012; Stepanov & Serebryany, *MemorySanitizer: fast detector of uninitialized memory use in C++*, CGO 2015. Constants documented at [docs/env_variables.md:1001-1022](../../../docs/env_variables.md) with `exit_code=86 (required for legacy reasons)`. |
+| Exit-code-as-oracle in libFuzzer | Serebryany, *Continuous Fuzzing with libFuzzer and AddressSanitizer*, IEEE SecDev 2016 + LLVM libFuzzer docs (https://llvm.org/docs/LibFuzzer.html); constants in [FuzzerFlags.def:52-55](../../libfuzzer/FuzzerFlags.def). |
+| AFL++'s configurable bug oracle (`AFL_CRASH_EXITCODE`) | Fioraldi, Maier, Eißfeldt, Heuse, *AFL++: Combining Incremental Steps of Fuzzing Research*, USENIX WOOT 2020. Implementation at [src/afl-forkserver.c:2391-2415](../../../src/afl-forkserver.c); user-facing semantics at [docs/env_variables.md:405-409](../../../docs/env_variables.md); historical introduction at [docs/Changelog.md:944](../../../docs/Changelog.md). |
+
 #### Validity signal — obtaining the exit code
 
 AFL++'s Python `post_run()` hook receives zero arguments. Inspecting `src/afl-fuzz-python.c` confirms this: the binding calls `PyTuple_New(0)` and passes no run-result to Python. AFL++'s forkserver captures the child's `waitpid()` status in `fsrv->child_status` and classifies it as `FSRV_RUN_OK`, `FSRV_RUN_CRASH`, or `FSRV_RUN_TMOUT`, but none of this is forwarded to the Python layer.
@@ -178,14 +225,18 @@ Only `exit()` is intercepted. Targets killed by a signal (SIGSEGV, SIGABRT) do n
 
 #### Combined reward
 
-Coverage reward is granted only on clean exit ($e_t = 0$). Every other outcome — non-zero exit code, signal-based crash, or any other abnormal termination — receives a fixed penalty:
+Coverage reward is granted only on clean exit ($e_t = \mathrm{EXIT\_SUCCESS}$).
+Every other outcome — non-zero exit code (any value distinct from
+`EXIT_SUCCESS`, including `EXIT_FAILURE`, sanitizer codes, or
+engine-specific error codes), signal-based crash, or any other abnormal
+termination — receives a fixed penalty:
 
 $$
 r_t = R(z_t', o_t) =
 \begin{cases}
--1.0, & e_t \neq 0 \text{ or exit code absent (signal crash)},\\[4pt]
-\sigma\!\left(\log S_t\right), & e_t = 0 \text{ and } S_t > 0,\\[4pt]
-0.5, & e_t = 0 \text{ and } S_t = 0,
+-1.0, & e_t \neq \mathrm{EXIT\_SUCCESS} \text{ or exit code absent (signal crash)},\\[4pt]
+\sigma\!\left(\log S_t\right), & e_t = \mathrm{EXIT\_SUCCESS} \text{ and } S_t > 0,\\[4pt]
+0.5, & e_t = \mathrm{EXIT\_SUCCESS} \text{ and } S_t = 0,
 \end{cases}
 $$
 

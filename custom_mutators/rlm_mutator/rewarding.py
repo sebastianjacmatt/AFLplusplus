@@ -341,9 +341,11 @@ class Rewarder:
     Holds no IO and no per-execution buffers — those live on the
     sub-rewarders that own them (``TFIDFCoverageRewarder`` for the SHM
     bitmap, ``ExitCodeRewarder`` for the exit-code file). This class
-    only encodes how the two outputs combine into a :class:`RewardResult`
-    via the gating knobs ``invalid_coverage_scale`` /
-    ``invalid_exit_penalty`` / ``missing_exit_penalty``.
+    only collapses CovRL Eq. 2 to the binary-validity form supported by
+    our exit-code-only setup:
+
+        reward = R_cov     if exit_code == 0
+               = -1.0      otherwise (non-zero or missing)
 
     :meth:`compute` is the single entry point. With ``obs is None``
     (the live fuzzing path) the sub-rewarders read live state —
@@ -352,29 +354,19 @@ class Rewarder:
     it scores a pre-captured observation, leaving room for an offline
     rescoring pass without changing the API.
 
-    @param tf_idf:                 Coverage rewarder; produces ``coverage_reward``.
-    @param exit_code:              Validity-proxy rewarder; consulted on non-zero exits.
-    @param invalid_coverage_scale: Coverage retained on non-zero exits (CoverageRewarder
-                                   parity; CovRL itself drops coverage entirely on
-                                   invalid runs — set to 0.0 for paper-faithful
-                                   behaviour, 1.0 to keep the legacy gating).
-    @param invalid_exit_penalty:   Penalty subtracted on non-zero exits.
-    @param missing_exit_penalty:   Penalty subtracted when no exit code was written.
+    @param tf_idf:    Coverage rewarder; produces ``coverage_reward`` (R_cov).
+    @param exit_code: Validity-proxy rewarder; ``invalid_reward`` (default
+                      -1.0) is used as the blanket penalty for any non-zero
+                      or missing exit.
     """
 
     def __init__(
         self,
-        tf_idf:                 TFIDFCoverageRewarder,
-        exit_code:              ExitCodeRewarder,
-        invalid_coverage_scale: float = 1.0,
-        invalid_exit_penalty:   float = 1.25,
-        missing_exit_penalty:   float = 1.5,
+        tf_idf:    TFIDFCoverageRewarder,
+        exit_code: ExitCodeRewarder,
     ) -> None:
-        self.tf_idf                 = tf_idf
-        self.exit_code              = exit_code
-        self.invalid_coverage_scale = invalid_coverage_scale
-        self.invalid_exit_penalty   = invalid_exit_penalty
-        self.missing_exit_penalty   = missing_exit_penalty
+        self.tf_idf    = tf_idf
+        self.exit_code = exit_code
 
     def compute(self, obs: ExecutionObservation | None = None) -> RewardResult:
         """Score one execution; reads live state when ``obs`` is omitted."""
@@ -387,20 +379,11 @@ class Rewarder:
         cov_reward = self.tf_idf.result(obs)
         valid      = obs.exit_code == 0
 
-        # Fuzzing-time scalar: exit-code-gated TF-IDF. The full CovRL signal
-        # (-1.0 syntax / -0.5 semantic / +R_cov) requires syntax-vs-semantic
-        # discrimination from afl-showmap and is applied by the offline
-        # rollout-patching pass via CovRLRewarder.
         if valid:
             reward = cov_reward
             reason = "valid"
         else:
-            penalty = (
-                self.missing_exit_penalty
-                if obs.exit_code is None
-                else self.invalid_exit_penalty
-            )
-            reward = self.invalid_coverage_scale * cov_reward - penalty
+            reward = self.exit_code.invalid_reward
             reason = "missing_exit_code" if obs.exit_code is None else "nonzero_exit"
 
         return RewardResult(
