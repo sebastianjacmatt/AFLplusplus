@@ -222,7 +222,13 @@ class CodeT5SpanMasker:
         current_sentinel: int | None = None
 
         for pos, token_id in enumerate(generated_ids):
-            if pos == 0 and token_id == self.decoder_start_token_id:
+            # HF encoder-decoder generators emit the decoder-start token at
+            # pos 0. For T5-family models that token is pad_token_id, so the
+            # eos/pad break below would terminate the parse on the very first
+            # iteration if we don't skip it explicitly. Skipping pos 0
+            # unconditionally is safe because sequences[0,0] is always the
+            # decoder-start by HF convention, never a real generated token.
+            if pos == 0:
                 continue
             if token_id == self.eos_token_id or token_id == self.pad_token_id:
                 break
