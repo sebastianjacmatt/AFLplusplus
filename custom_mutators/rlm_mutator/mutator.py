@@ -163,7 +163,7 @@ class Mutator:
             x_t              = result.x_t,
             y_t              = result.y_t,
             log_prob         = result.old_logprob,
-            executed_program = bytes(out_buf),
+            executed_program = out_buf,        # already bytes; safe to share
             ref_log_prob     = ref_lp,
         )
 
@@ -171,16 +171,20 @@ class Mutator:
         self._sample += 1
         return out_buf
 
-    def on_post_run(
-        self,
-        reward_result: RewardResult,
-    ) -> None:
-        """post_run(): patch reward + diagnostic fields on the pending sample."""
-        if self._pending_sample_id is not None:
-            self.buffer.patch_reward(
-                self._pending_sample_id,
-                reward_result,
-            )
+    def on_post_run(self, rewarder: Rewarder) -> None:
+        """post_run(): score the just-executed sample if there is one.
+
+        AFL fires post_run after every target execution, including its own
+        calibration / dry-run / trim stages where we did not call fuzz()
+        and have no sample to score. Gating compute() and observe_last_seed()
+        on a pending sample id keeps those stages from snapshotting SHM,
+        consuming exit-hook output, or polluting TF-IDF DF.
+        """
+        if self._pending_sample_id is None:
+            return
+        reward_result = rewarder.compute()
+        rewarder.tf_idf.observe_last_seed()
+        self.buffer.patch_reward(self._pending_sample_id, reward_result)
         self._pending_sample_id = None
 
     def maybe_finetune(self, rewarder: Rewarder) -> None:

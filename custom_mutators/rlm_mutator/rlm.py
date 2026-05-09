@@ -183,7 +183,13 @@ def fuzz_count(buf: bytearray) -> int:
 
 
 def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
-    """Generate one mutation through Mutator and return bytes to AFL++."""
+    """Generate one mutation through Mutator and return bytes to AFL++.
+
+    Returns a bytearray (not bytes) so AFL's py_bytes() takes the
+    PyByteArray_AsString fast path. Returning bytes makes that call fail
+    silently and leaves a stale Python TypeError in the interpreter state
+    that surfaces as a delayed segfault during a later C-API operation.
+    """
     del add_buf
 
     if MUTATOR is None or REWARDER is None:
@@ -191,21 +197,18 @@ def fuzz(buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
 
     REWARDER.clear_exit_code()
     out = MUTATOR.fuzz_one(max_size)
-    return out
+    return bytearray(out)
 
 
 
 def post_run() -> None:
-    """Compute reward and fold the execution into TF-IDF DF.
+    """Score the just-executed mutation if Mutator has a pending sample.
 
-    TF * IDF_{t-1} is computed against the snapshot rolled forward by the
-    previous maybe_finetune cycle. The bitmap is also folded into DF —
-    every executed input counts as a corpus document, the cheap online
-    approximation of CovRL's "DF over saved seeds" semantics.
+    Mutator gates the actual reward + DF work on the pending-sample id so
+    AFL's calibration / dry-run / trim stages — which fire post_run without
+    a preceding fuzz() — don't pollute TF-IDF or read SHM/exit-file state
+    that doesn't correspond to one of our samples.
     """
     if MUTATOR is None or REWARDER is None:
         raise RuntimeError("post_run() called before init()")
-
-    reward_result = REWARDER.compute()
-    REWARDER.tf_idf.observe_last_seed()
-    MUTATOR.on_post_run(reward_result)
+    MUTATOR.on_post_run(REWARDER)
