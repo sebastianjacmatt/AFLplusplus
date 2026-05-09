@@ -16,7 +16,7 @@
   "mask_strategy":  "span",
   "bitmap_size":    131072,
   "idf_alpha":      0.6,
-  "finetune_every": 16,
+  "finetune_every": 4,
 
   "algorithm":        "grpo",
   "learning_rate":    1e-4,
