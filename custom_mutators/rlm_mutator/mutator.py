@@ -53,6 +53,21 @@ class MaskedSpanPrediction:
     y_t:          list[int]
 
 
+@dataclass
+class _CachedSample:
+    """One pre-generated sample waiting to be returned by fuzz_one().
+
+    Filled by _fill_group_cache() at the start of each GRPO group: one
+    batched generate produces group_size of these, then fuzz_one() pops them
+    one by one. Holds everything fuzz_one needs to log + return.
+    """
+    x_t:         list[int]
+    y_t:         list[int]
+    old_logprob: float
+    out_buf:     bytes
+    ref_lp:      float | None
+
+
 # ---------------------------------------------------------------------------
 # Mutator
 # ---------------------------------------------------------------------------
@@ -95,6 +110,9 @@ class Mutator:
         self._sample:   int               = 0
         self._pending_sample_id: str | None = None
         self._next_group_id: int = 0
+        # Group-batched generation cache: one entry per pending sample in the
+        # current GRPO group. Refilled at every group boundary in fuzz_one.
+        self._group_cache: list[_CachedSample] = []
 
     # ------------------------------------------------------------------
     # Convenience accessor — mirrors design's trainer.model indirection
@@ -114,47 +132,39 @@ class Mutator:
         self._masked = None
         self._group  = -1
         self._sample = 0
+        self._group_cache.clear()
 
     def fuzz_one(self, max_size: int) -> bytes:
         """fuzz(): one mutation. Returns mutated bytes.
 
-        Re-masks at each `sample % group_size == 0` so that every
-        group_size samples in a group share one x_t (GRPO precondition). The
-        recorded group_id is monotonic across seeds so grouped training never
-        merges unrelated samples from different seeds.
+        Generation is batched per GRPO group. At every `sample % group_size == 0`
+        boundary we re-mask once, run one batched generate (and one batched
+        ref_logprob if needed), and stash group_size pre-generated samples in
+        self._group_cache. Subsequent fuzz_one calls in the same group pop from
+        the cache without touching the model. The recorded group_id is monotonic
+        across seeds so grouped training never merges unrelated samples from
+        different seeds.
         """
         if self._tokens is None:
             raise RuntimeError("Mutator.fuzz_one() called before on_new_seed()")
 
-        # mask seed
         if self._sample % self.training_cfg.group_size == 0:
             self._masked = self._span_masker.mask(list(self._tokens))
             self._group = self._next_group_id
             self._next_group_id += 1
+            self._fill_group_cache(self._masked)
 
-        masked = self._masked
-        if masked is None or not masked.masked:
-            raise RuntimeError("Mutator.fuzz_one() has no masked program")
-        
-        # predict masked spans and return reconstructed program
-        result  = self.masked_span_prediction(masked)
-        # encode back into bytes
-        out_buf = self.encode(result.predicted_ids)
-        
-        if len(out_buf) > max_size:
+        if not self._group_cache:
+            raise RuntimeError("Mutator.fuzz_one() has empty group cache")
+
+        cached = self._group_cache.pop(0)
+
+        if len(cached.out_buf) > max_size:
             raise RuntimeError(
                 "Mutator.fuzz_one() generated a program larger than AFL max_size "
-                f"(generated={len(out_buf)}, max_size={max_size}). "
+                f"(generated={len(cached.out_buf)}, max_size={max_size}). "
                 "Adjust generation budget, masking parameters, or AFL max_size."
             )
-
-        ref_lp = None
-        if self.training_cfg.kl_coef > 0.0:
-            try:
-                ref_lp = self.trainer.ref_logprob(result.x_t, result.y_t)
-            except Exception as exc:
-                raise RuntimeError("Could not calculate reference log-prob for KL") from exc
-
 
         sample_id = self.buffer.new_sample_id()
         # Diagnostic: log first 8 sampled tokens per fuzz_one. Within a GRPO group
@@ -166,22 +176,54 @@ class Mutator:
             "[mut] %s group=%d logp=%.3f y_t[:8]=%s",
             sample_id,
             self._group,
-            result.old_logprob,
-            result.y_t[:8],
+            cached.old_logprob,
+            cached.y_t[:8],
         )
         self.buffer.log(
             sample_id        = sample_id,
             group_id         = self._group,
-            x_t              = result.x_t,
-            y_t              = result.y_t,
-            log_prob         = result.old_logprob,
-            executed_program = out_buf,        # already bytes; safe to share
-            ref_log_prob     = ref_lp,
+            x_t              = cached.x_t,
+            y_t              = cached.y_t,
+            log_prob         = cached.old_logprob,
+            executed_program = cached.out_buf,
+            ref_log_prob     = cached.ref_lp,
         )
 
         self._pending_sample_id = sample_id
         self._sample += 1
-        return out_buf
+        return cached.out_buf
+
+    def _fill_group_cache(self, masked: CodeT5MaskedProgram) -> None:
+        """Run one batched generate for the whole group, then one batched
+        ref_logprob, and stash group_size cached samples for subsequent
+        fuzz_one calls."""
+        if masked is None or not masked.masked:
+            raise RuntimeError("Mutator._fill_group_cache() has no masked program")
+
+        group_size = self.training_cfg.group_size
+        predictions = self.masked_span_prediction_batch(masked, group_size)
+
+        if self.training_cfg.kl_coef > 0.0:
+            try:
+                ref_lps = self.trainer.ref_logprob_batch(
+                    [p.x_t for p in predictions],
+                    [p.y_t for p in predictions],
+                )
+            except Exception as exc:
+                raise RuntimeError("Could not calculate reference log-prob for KL") from exc
+        else:
+            ref_lps = [None] * len(predictions)
+
+        self._group_cache = [
+            _CachedSample(
+                x_t         = p.x_t,
+                y_t         = p.y_t,
+                old_logprob = p.old_logprob,
+                out_buf     = self.encode(p.predicted_ids),
+                ref_lp      = ref_lp,
+            )
+            for p, ref_lp in zip(predictions, ref_lps)
+        ]
 
     def on_post_run(self, rewarder: Rewarder) -> None:
         """post_run(): score the just-executed sample if there is one.
@@ -241,9 +283,22 @@ class Mutator:
     # ------------------------------------------------------------------
 
     def masked_span_prediction(self, masked_program: CodeT5MaskedProgram) -> MaskedSpanPrediction:
-        """Generate predictions for all MASK spans in one forward+decode pass."""
+        """Single-sample wrapper around masked_span_prediction_batch."""
+        return self.masked_span_prediction_batch(masked_program, 1)[0]
+
+    def masked_span_prediction_batch(
+        self,
+        masked_program: CodeT5MaskedProgram,
+        n_samples: int,
+    ) -> list[MaskedSpanPrediction]:
+        """Generate `n_samples` predictions sharing one masked context in one
+        forward+decode pass. The encoder runs once over masked_program; the
+        decoder samples n_samples independent trajectories via HF's
+        `num_return_sequences`. This is the GRPO-group-aligned batch path."""
         if not masked_program.spans:
             raise RuntimeError("no spans found in masked program, likley because the seed was too short")
+        if n_samples < 1:
+            raise ValueError(f"n_samples must be >= 1, got {n_samples}")
 
         masked_input_ids = list(masked_program.input_ids)
         max_len = self.trainer.model_cfg.max_length
@@ -252,12 +307,6 @@ class Mutator:
                 "Masked span prediction input exceeds model max_length budget "
                 f"(input_tokens={len(masked_input_ids)}, max_length={max_len}, "
                 f"reserved_tokens=3). Adjust max_length or masking parameters."
-            )
-
-        if not masked_program.spans:
-            raise RuntimeError(
-                "Masked span prediction has no spans after validation. "
-                "Adjust seed filtering or masking parameters."
             )
 
         max_new_tokens = self._span_masker.generation_budget(
@@ -286,34 +335,40 @@ class Mutator:
                 max_new_tokens          = max_new_tokens,
                 output_scores           = True,
                 return_dict_in_generate = True,
+                num_return_sequences    = n_samples,
             )
 
-        y_t, old_logprob = self._extract_logprob(outputs)
-        generated_ids    = outputs.sequences.tolist()[0]
-        predicted_ids    = self._span_masker.reconstruct(masked_program, generated_ids)
-
-        return MaskedSpanPrediction(
-            predicted_ids = predicted_ids,
-            old_logprob  = old_logprob,
-            x_t          = masked_input_ids,
-            y_t          = y_t,
-        )
+        results: list[MaskedSpanPrediction] = []
+        for i in range(n_samples):
+            y_t_i, lp_i = self._extract_logprob_at(outputs, i)
+            seq_i = outputs.sequences[i].tolist()
+            predicted_ids_i = self._span_masker.reconstruct(masked_program, seq_i)
+            results.append(MaskedSpanPrediction(
+                predicted_ids = predicted_ids_i,
+                old_logprob   = lp_i,
+                x_t           = masked_input_ids,
+                y_t           = y_t_i,
+            ))
+        return results
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _extract_logprob(self, outputs) -> tuple[list[int], float]:
-        """Collect generated token IDs and compute mean per-token log-prob."""
+    def _extract_logprob_at(self, outputs, beam_idx: int) -> tuple[list[int], float]:
+        """Collect generated token IDs and mean per-token log-prob for one
+        trajectory in a (possibly batched) generate output. With
+        num_return_sequences=N, sequences has shape (N, T) and each
+        scores[t] has shape (N, vocab) — index by beam_idx."""
         sequences    = outputs.sequences
         scores       = outputs.scores
         y_t          = []
         log_prob_sum = 0.0
         for t, step_score in enumerate(scores):
-            tok = sequences[0, t + 1].item()   # +1 skips decoder_start_token
+            tok = sequences[beam_idx, t + 1].item()   # +1 skips decoder_start_token
             if tok == self._eos_token:
                 break
-            lp = F.log_softmax(step_score[0], dim=-1)[tok].item()
+            lp = F.log_softmax(step_score[beam_idx], dim=-1)[tok].item()
             log_prob_sum += lp
             y_t.append(tok)
         old_logprob = log_prob_sum / max(len(y_t), 1)

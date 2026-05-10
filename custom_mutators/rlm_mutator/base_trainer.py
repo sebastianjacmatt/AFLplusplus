@@ -13,6 +13,7 @@ import copy
 import os
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, SequentialSampler
 from transformers import (
     AutoModelForSeq2SeqLM,
@@ -99,19 +100,63 @@ class BaseTrainer(Trainer):
         """mean per-token log-probability pi_ref(y_t | x_t)."""
         return self.sequence_logprob(self._ref_model, x_t, y_t)
 
-    def sequence_logprob(self, model, x_t: list[int], y_t: list[int]) -> float:
-        """Mean per-token log pi(y_t | x_t) under the given model.
+    def ref_logprob_batch(self, x_ts: list[list[int]], y_ts: list[list[int]]) -> list[float]:
+        """Batched mean per-token log-probability pi_ref(y | x) for many pairs."""
+        return self.sequence_logprob_batch(self._ref_model, x_ts, y_ts)
 
-        Uses the seq2seq negative log-likelihood exposed by HF models when
-        `labels` is passed.  Returns -loss (so higher = more likely).
+    def sequence_logprob(self, model, x_t: list[int], y_t: list[int]) -> float:
+        """Mean per-token log pi(y_t | x_t) under the given model."""
+        return self.sequence_logprob_batch(model, [x_t], [y_t])[0]
+
+    def sequence_logprob_batch(
+        self,
+        model,
+        x_ts: list[list[int]],
+        y_ts: list[list[int]],
+    ) -> list[float]:
+        """Per-sequence mean log pi(y | x) for an aligned (x_ts, y_ts) batch.
+
+        HF's `out.loss` is a scalar averaged over all non-ignored label tokens
+        in the batch — fine for n=1 but loses per-sequence resolution for n>1.
+        We pad and forward once, then gather log-probs at the true label
+        positions and reduce per-sequence with the label mask.
         """
-        input_ids   = torch.tensor([x_t], dtype=torch.long, device=model.device)
-        decoder_ids = torch.tensor(
-            [y_t + [self.tokenizer.eos_token_id]], dtype=torch.long, device=model.device,
-        )
+        if len(x_ts) != len(y_ts):
+            raise ValueError(
+                f"sequence_logprob_batch: len(x_ts)={len(x_ts)} != len(y_ts)={len(y_ts)}"
+            )
+
+        device = model.device
+        eos_id = self.tokenizer.eos_token_id
+        pad_id = self.tokenizer.pad_token_id
+
+        n = len(x_ts)
+        max_x = max(len(x) for x in x_ts)
+        max_y = max(len(y) for y in y_ts) + 1  # +1 for the appended EOS
+
+        input_ids = torch.full((n, max_x), pad_id, dtype=torch.long, device=device)
+        attn_mask = torch.zeros((n, max_x), dtype=torch.long, device=device)
+        for i, x in enumerate(x_ts):
+            input_ids[i, : len(x)] = torch.tensor(x, dtype=torch.long, device=device)
+            attn_mask[i, : len(x)] = 1
+
+        # -100 is HF's "ignore" label: those positions don't contribute to loss
+        # *and* we mask them out manually below when averaging.
+        labels = torch.full((n, max_y), -100, dtype=torch.long, device=device)
+        for i, y in enumerate(y_ts):
+            seq = y + [eos_id]
+            labels[i, : len(seq)] = torch.tensor(seq, dtype=torch.long, device=device)
+
         with torch.no_grad():
-            out = model(input_ids=input_ids, labels=decoder_ids)
-        return -out.loss.item()
+            out = model(input_ids=input_ids, attention_mask=attn_mask, labels=labels)
+
+        log_probs = F.log_softmax(out.logits, dim=-1)
+        safe_labels = labels.masked_fill(labels == -100, 0)
+        token_lp = log_probs.gather(2, safe_labels.unsqueeze(-1)).squeeze(-1)
+        mask = (labels != -100).float()
+        seq_sum = (token_lp * mask).sum(dim=1)
+        seq_len = mask.sum(dim=1).clamp(min=1)
+        return (seq_sum / seq_len).tolist()
 
     def kl_divergence(self, logprob, ref_logprob):
         """Token-level log-ratio used as a KL approximation.
