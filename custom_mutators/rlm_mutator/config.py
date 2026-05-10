@@ -88,6 +88,17 @@ class ModelConfig:
         default=16,
         metadata={"help": "Maximum generated tokens allowed per masked span prediction."},
     )
+    whole_word_masking: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Sample masked spans in word units before subword expansion "
+                "(CodeT5 §3.2 / CodeT5+ §3.1: 'sample spans before subword "
+                "tokenization to avoid masking partial words'). False reverts "
+                "to legacy token-level span sampling."
+            )
+        },
+    )
 
     def resolve_device(self) -> str:
         if self.device == "auto":

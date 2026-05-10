@@ -64,6 +64,7 @@ class CodeT5SpanMasker:
         mean_span_length: float = 3.0,
         min_span_length: int = 1,
         max_span_length: int = 5,
+        whole_word_masking: bool = True,
         rng: random.Random | None = None,
     ):
         if not 0.0 <= corruption_rate <= 1.0:
@@ -95,6 +96,7 @@ class CodeT5SpanMasker:
         self.mean_span_length = mean_span_length
         self.min_span_length = min_span_length
         self.max_span_length = max_span_length
+        self.whole_word_masking = whole_word_masking
         self.rng = rng or random
 
         self.pad_token_id = tokenizer.pad_token_id
@@ -123,7 +125,10 @@ class CodeT5SpanMasker:
                 spans=[],
             )
 
-        noise_mask = self._random_spans_noise_mask(n_tokens)
+        if self.whole_word_masking:
+            noise_mask = self._random_word_spans_noise_mask(original)
+        else:
+            noise_mask = self._random_spans_noise_mask(n_tokens)
         input_ids: list[int] = []
         spans: list[CodeT5MaskedSpan] = []
         idx = 0
@@ -287,6 +292,96 @@ class CodeT5SpanMasker:
                 idx += 1
 
         return mask[:length]
+
+    def _word_starts(self, token_ids: list[int]) -> list[int]:
+        """Token positions where a new word starts. Word i spans
+        [starts[i], starts[i+1]); the trailing entry is len(token_ids).
+
+        Heuristic: a token starts a new word iff (a) it's at position 0, or
+        (b) its surface form starts with a BPE space marker — 'Ġ' for
+        byte-level BPE (CodeT5 / CodeT5+ / GPT-2 / RoBERTa) or '▁' for
+        SentencePiece (T5). Sub-pieces of an identifier (e.g., '_' and
+        'search' after 'Ġbinary' for 'binary_search') and adjacent
+        punctuation are treated as continuations of the preceding word.
+        That groups identifiers atomically per CodeT5 §3.2 ('avoid masking
+        partial sub-tokens') without needing a fast-tokenizer
+        round-trip through word_ids().
+        """
+        n = len(token_ids)
+        if n == 0:
+            return [0]
+        tokens = self.tokenizer.convert_ids_to_tokens(token_ids)
+        starts = [0]
+        for i in range(1, n):
+            tok = tokens[i]
+            if tok and (tok[0] == "Ġ" or tok[0] == "▁"):
+                starts.append(i)
+        starts.append(n)
+        return starts
+
+    def _random_word_spans_noise_mask(self, token_ids: list[int]) -> list[bool]:
+        """T5-style random span sampling at the WORD level.
+
+        CodeT5 §3.2 / CodeT5+ §3.1 specify sampling spans before subword
+        tokenization to avoid masking partial words. We approximate that on
+        already-tokenized input by detecting word boundaries from the BPE
+        space marker, sampling spans in word units (length drawn from the
+        same uniform 1..max_span_length around mean_span_length as the
+        token-level path), and expanding each masked word to all its
+        underlying subword tokens. The corruption budget is still expressed
+        in TOKENS (paper specifies token-level rate), so we accumulate the
+        per-word token count until ~corruption_rate × n_tokens are masked.
+        """
+        n_tokens = len(token_ids)
+        if n_tokens == 0:
+            return []
+
+        word_starts = self._word_starts(token_ids)
+        n_words = len(word_starts) - 1
+        if n_words == 0:
+            return [False] * n_tokens
+
+        target_noise_tokens = int(round(n_tokens * self.corruption_rate))
+        target_noise_tokens = min(max(target_noise_tokens, 1), n_tokens)
+
+        word_mask = [False] * n_words
+        masked_tokens = 0
+        spans_used = 0
+        word_idx = 0
+
+        while word_idx < n_words:
+            remaining_words = n_words - word_idx
+            remaining_noise = target_noise_tokens - masked_tokens
+            remaining_sentinels = self._max_sentinel_spans - spans_used
+            if remaining_noise <= 0 or remaining_sentinels <= 0:
+                break
+
+            remaining_tokens = n_tokens - word_starts[word_idx]
+            density = remaining_noise / max(remaining_tokens, 1)
+            if self.rng.random() > density:
+                word_idx += 1
+                continue
+
+            span_word_len = self._sample_span_length()
+            span_word_len = min(span_word_len, remaining_words)
+            span_tok_len = word_starts[word_idx + span_word_len] - word_starts[word_idx]
+
+            for w in range(word_idx, word_idx + span_word_len):
+                word_mask[w] = True
+            masked_tokens += span_tok_len
+            spans_used += 1
+            word_idx += span_word_len
+
+            # T5-style separator: skip one word so adjacent spans don't merge.
+            if word_idx < n_words:
+                word_idx += 1
+
+        token_mask = [False] * n_tokens
+        for w in range(n_words):
+            if word_mask[w]:
+                for t in range(word_starts[w], word_starts[w + 1]):
+                    token_mask[t] = True
+        return token_mask
 
     def _sample_span_length(self) -> int:
         """Sample a bounded span length with mass centered near the mean."""

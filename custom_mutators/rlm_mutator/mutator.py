@@ -98,10 +98,11 @@ class Mutator:
         self._max_new_tokens_per_span = trainer.model_cfg.max_new_tokens_per_mask
         self._span_masker = CodeT5SpanMasker(
             tok,
-            corruption_rate   = trainer.model_cfg.mask_probability,
-            mean_span_length  = trainer.model_cfg.mean_span_length,
-            min_span_length   = trainer.model_cfg.min_span_length,
-            max_span_length   = trainer.model_cfg.max_span_length,
+            corruption_rate    = trainer.model_cfg.mask_probability,
+            mean_span_length   = trainer.model_cfg.mean_span_length,
+            min_span_length    = trainer.model_cfg.min_span_length,
+            max_span_length    = trainer.model_cfg.max_span_length,
+            whole_word_masking = trainer.model_cfg.whole_word_masking,
         )
         # Per-seed state (reset in on_new_seed)
         self._tokens:   list[int]                  | None = None
