@@ -151,6 +151,13 @@ class RolloutLogger:
                 ]
                 row.extend(_csv_opt(r.get(name)) for name in RewardResult.diagnostic_field_names())
                 writer.writerow(row)
+                # The bytes are now on disk via _write_rollout_artifacts and
+                # are never read again — the downstream RolloutDataset only
+                # uses x_t/y_t/log_prob/reward/ref_log_prob/group_id during
+                # training. Drop the in-memory copy so it doesn't survive
+                # into trainer.train_dataset across the train→next-collection
+                # window.
+                r["executed_program"] = None
 
         if self.log_fn is not None:
             self.log_fn(_rollout_scalars(finetune_id, records))
