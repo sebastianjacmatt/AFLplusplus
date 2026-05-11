@@ -114,6 +114,10 @@ class Mutator:
         # Group-batched generation cache: one entry per pending sample in the
         # current GRPO group. Refilled at every group boundary in fuzz_one.
         self._group_cache: list[_CachedSample] = []
+        # Set in on_new_seed when the seed tokenizes to zero tokens (empty
+        # buf or all-non-decodable bytes). rlm.fuzz_count reads should_fuzz()
+        # and returns 0 to AFL so fuzz() is never called for an unmaskable seed.
+        self._skip_seed: bool = False
 
     # ------------------------------------------------------------------
     # Convenience accessor — mirrors design's trainer.model indirection
@@ -134,6 +138,19 @@ class Mutator:
         self._group  = -1
         self._sample = 0
         self._group_cache.clear()
+        if not self._tokens:
+            log.warning(
+                "[mutator] seed tokenises to 0 tokens (buf_len=%d); marking unfuzzable",
+                len(buf),
+            )
+            self._skip_seed = True
+        else:
+            self._skip_seed = False
+
+    def should_fuzz(self) -> bool:
+        """rlm.fuzz_count gates on this: returns False iff on_new_seed marked
+        the seed unfuzzable (currently: empty after tokenisation)."""
+        return not self._skip_seed
 
     def fuzz_one(self, max_size: int) -> bytes:
         """fuzz(): one mutation. Returns mutated bytes.

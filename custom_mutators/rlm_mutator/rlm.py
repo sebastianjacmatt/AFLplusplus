@@ -189,6 +189,10 @@ def fuzz_count(buf: bytearray) -> int:
         MUTATOR.maybe_finetune(REWARDER)
 
     MUTATOR.on_new_seed(buf)
+    if not MUTATOR.should_fuzz():
+        # Mutator marked the seed unfuzzable (e.g., 0 tokens after
+        # tokenisation). Returning 0 tells AFL to skip fuzz() for this seed.
+        return 0
     return AFL_CFG.fuzz_count
 
 

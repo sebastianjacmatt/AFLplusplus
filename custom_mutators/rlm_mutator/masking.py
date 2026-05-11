@@ -376,6 +376,18 @@ class CodeT5SpanMasker:
             if word_idx < n_words:
                 word_idx += 1
 
+        # Force at least one masked word if the probabilistic walk picked
+        # nothing. The token-level path guarantees this naturally because
+        # density at the final token is `remaining_noise / 1 ≥ 1.0`, but the
+        # word-level variant computes density over the *token* slice of the
+        # last word, which may be > 1 token and thus leave density < 1.0 at
+        # the final step — possible all-False outcome on small inputs.
+        # Downstream Mutator._fill_group_cache treats zero-span masking as
+        # fatal, so we satisfy "always produce some corruption" here.
+        if not any(word_mask) and n_words > 0:
+            forced_w = self.rng.randint(0, n_words - 1)
+            word_mask[forced_w] = True
+
         token_mask = [False] * n_tokens
         for w in range(n_words):
             if word_mask[w]:
