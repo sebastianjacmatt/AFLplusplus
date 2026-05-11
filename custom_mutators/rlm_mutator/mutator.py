@@ -274,16 +274,8 @@ class Mutator:
         rewarder.tf_idf.update_cycle()
         dataset = RolloutDataset(records)
         self.trainer.set_rollout_dataset(dataset)
-        try:
-            self.trainer.train()                    # HF Trainer rebuilds optimizer each call
-            self.trainer.snapshot_ref()             # re-anchor pi_ref after weights updated
-        finally:
-            # Drop the just-trained dataset so it doesn't sit in memory next
-            # to the freshly-accumulating buffer for the entire next
-            # collection window. Local `records` / `dataset` go out of scope
-            # on return; clearing trainer.train_dataset breaks the last
-            # reference and lets the records GC immediately.
-            self.trainer.set_rollout_dataset(None)
+        self.trainer.train()                        # HF Trainer rebuilds optimizer each call
+        self.trainer.snapshot_ref()                 # re-anchor pi_ref after weights updated
 
     # ------------------------------------------------------------------
     # Byte <-> token-id conversion
