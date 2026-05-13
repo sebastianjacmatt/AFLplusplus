@@ -212,26 +212,29 @@ def _rollout_scalars(finetune_id: int, records: list[dict]) -> dict[str, float]:
         group_exit_codes.setdefault(r["group_id"], set()).add(r.get("exit_code"))
     group_means = [statistics.fmean(g) for g in groups.values()]
     group_stds  = [statistics.pstdev(g) if len(g) > 1 else 0.0 for g in groups.values()]
-    mixed_exit_groups = sum(1 for exits in group_exit_codes.values() if len(exits) > 1)
-    all_valid_groups  = sum(1 for exits in group_exit_codes.values() if exits == {0})
-    all_invalid_groups = sum(1 for exits in group_exit_codes.values() if 0 not in exits)
+    mixed_exit_groups    = sum(1 for exits in group_exit_codes.values() if len(exits) > 1)
+    all_valid_groups     = sum(1 for exits in group_exit_codes.values() if exits == {0})
+    all_invalid_groups   = sum(1 for exits in group_exit_codes.values() if 0 not in exits)
+    # Groups where std < 0.01 produce near-zero GRPO advantage → wasted gradient steps.
+    degenerate_groups    = sum(1 for s in group_stds if s < 0.01)
 
     return {
-        "rollout/finetune_id":          float(finetune_id),
-        "rollout/reward_mean":          statistics.fmean(rewards),
-        "rollout/reward_std":           statistics.pstdev(rewards) if n_samples > 1 else 0.0,
-        "rollout/reward_min":           min(rewards),
-        "rollout/reward_max":           max(rewards),
-        "rollout/valid_rate":           valid_rate,
-        "rollout/error_rate":           error_rate,
-        "rollout/coverage_reward_mean": statistics.fmean(cov_vals) if cov_vals else 0.0,
-        "rollout/group_reward_mean":    statistics.fmean(group_means),
-        "rollout/group_reward_std_mean": statistics.fmean(group_stds) if group_stds else 0.0,
-        "rollout/mixed_exit_group_rate": mixed_exit_groups / n_groups if n_groups else 0.0,
-        "rollout/all_valid_group_rate": all_valid_groups / n_groups if n_groups else 0.0,
+        "rollout/finetune_id":            float(finetune_id),
+        "rollout/reward_mean":            statistics.fmean(rewards),
+        "rollout/reward_std":             statistics.pstdev(rewards) if n_samples > 1 else 0.0,
+        "rollout/reward_min":             min(rewards),
+        "rollout/reward_max":             max(rewards),
+        "rollout/valid_rate":             valid_rate,
+        "rollout/error_rate":             error_rate,
+        "rollout/coverage_reward_mean":   statistics.fmean(cov_vals) if cov_vals else 0.0,
+        "rollout/group_reward_mean":      statistics.fmean(group_means),
+        "rollout/group_reward_std_mean":  statistics.fmean(group_stds) if group_stds else 0.0,
+        "rollout/mixed_exit_group_rate":  mixed_exit_groups  / n_groups if n_groups else 0.0,
+        "rollout/all_valid_group_rate":   all_valid_groups   / n_groups if n_groups else 0.0,
         "rollout/all_invalid_group_rate": all_invalid_groups / n_groups if n_groups else 0.0,
-        "rollout/n_samples":            float(n_samples),
-        "rollout/n_groups":             float(n_groups),
+        "rollout/degenerate_group_rate":  degenerate_groups  / n_groups if n_groups else 0.0,
+        "rollout/n_samples":              float(n_samples),
+        "rollout/n_groups":               float(n_groups),
     }
 
 

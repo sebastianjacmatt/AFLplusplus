@@ -221,6 +221,17 @@ class Mutator:
         group_size = self.training_cfg.group_size
         predictions = self.masked_span_prediction_batch(masked, group_size)
 
+        # Recompute old_log_prob via the actor's raw forward pass so it uses the
+        # same unfiltered logit distribution as compute_loss. outputs.scores from
+        # generate() are top_k/top_p filtered, which concentrates probability mass
+        # and inflates log-probs relative to the raw distribution. That mismatch
+        # makes ratio = exp(new - old) << 1.0 at step 0, clipping every gradient.
+        old_lps = self.trainer.sequence_logprob_batch(
+            self.trainer.model,
+            [p.x_t for p in predictions],
+            [p.y_t for p in predictions],
+        )
+
         if self.training_cfg.kl_coef > 0.0:
             try:
                 ref_lps = self.trainer.ref_logprob_batch(
@@ -236,11 +247,11 @@ class Mutator:
             _CachedSample(
                 x_t         = p.x_t,
                 y_t         = p.y_t,
-                old_logprob = p.old_logprob,
+                old_logprob = old_lp,
                 out_buf     = self.encode(p.predicted_ids),
                 ref_lp      = ref_lp,
             )
-            for p, ref_lp in zip(predictions, ref_lps)
+            for p, old_lp, ref_lp in zip(predictions, old_lps, ref_lps)
         ]
 
     def on_post_run(self, rewarder: Rewarder) -> None:

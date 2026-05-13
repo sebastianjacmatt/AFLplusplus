@@ -475,13 +475,19 @@ class Rewarder:
 
     def __init__(
         self,
-        tf_idf:    TFIDFCoverageRewarder,
-        exit_code: ExitCodeRewarder,
-        validity:  "StderrValidityRewarder | None" = None,
+        tf_idf:          TFIDFCoverageRewarder,
+        exit_code:       ExitCodeRewarder,
+        validity:        "StderrValidityRewarder | None" = None,
+        validity_bonus:  float = 0.0,
     ) -> None:
-        self.tf_idf    = tf_idf
-        self.exit_code = exit_code
-        self.validity  = validity
+        if not 0.0 <= validity_bonus < 1.0:
+            raise ValueError(
+                f"validity_bonus ({validity_bonus}) must be in [0, 1)."
+            )
+        self.tf_idf         = tf_idf
+        self.exit_code      = exit_code
+        self.validity       = validity
+        self.validity_bonus = validity_bonus
 
     def compute(self, obs: ExecutionObservation | None = None) -> RewardResult:
         """Score one execution; reads live state when ``obs`` is omitted."""
@@ -503,17 +509,23 @@ class Rewarder:
         elif obs.validity == "semantic":
             reward, reason, is_valid = -0.5, "semantic_error", False
         elif obs.validity == "valid" and obs.exit_code == 0:
-            reward, reason, is_valid = cov_reward, "valid", True
+            reward = self._shape_valid_reward(cov_reward)
+            reason, is_valid = "valid", True
         else:
             # No stderr file (None) or stderr-says-valid-but-exit-non-zero
             # (defensive). Fall back to the binary exit-code path.
             if obs.exit_code == 0:
-                reward, reason, is_valid = cov_reward, "valid", True
+                reward = self._shape_valid_reward(cov_reward)
+                reason, is_valid = "valid", True
             else:
                 reward = self.exit_code.invalid_reward
                 reason = "missing_exit_code" if obs.exit_code is None else "nonzero_exit"
                 is_valid = False
 
+        # novelty_score intentionally records raw R_cov, not the shaped reward,
+        # so offline analysis can distinguish the coverage component. A proper
+        # sequence-level novelty metric (e.g. corpus n-gram distance) would
+        # replace this field once corpus token storage is available.
         return RewardResult(
             reward          = reward,
             coverage_reward = cov_reward,
@@ -531,6 +543,17 @@ class Rewarder:
         self.exit_code.clear()
         if self.validity is not None:
             self.validity.clear()
+
+    def _shape_valid_reward(self, cov_reward: float) -> float:
+        """Apply validity bonus: r = b + (1-b) * R_cov.
+
+        With b=0 this is a no-op (pure coverage). With b=0.3 a zero-coverage
+        valid program earns 0.3 and a high-coverage one earns up to 1.0,
+        widening within-group advantage variance when all samples are valid.
+        """
+        if self.validity_bonus == 0.0:
+            return cov_reward
+        return round(self.validity_bonus + (1.0 - self.validity_bonus) * cov_reward, 4)
 
 
 # ---------------------------------------------------------------------------

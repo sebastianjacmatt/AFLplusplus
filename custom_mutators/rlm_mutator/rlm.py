@@ -126,6 +126,7 @@ def init(seed: int) -> None:
         validity = StderrValidityRewarder(
             stderr_path = stderr_path,
         ),
+        validity_bonus = AFL_CFG.validity_bonus,
     )
 
     _queue_get_count = 0

@@ -142,6 +142,18 @@ class AFLConfig:
         default=64,
         metadata={"help": "queue_get() calls between finetune cycles."},
     )
+    validity_bonus: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Flat validity credit added to the valid-program reward branch. "
+                "Final reward = validity_bonus + (1 - validity_bonus) * R_cov. "
+                "0.0 = pure coverage (CovRL default). 0.3 creates a 3-level reward "
+                "floor: syntax=-1.0 / semantic=-0.5 / valid-zero-cov=0.3 / valid-high=~0.85, "
+                "widening within-group advantage variance for all-valid groups."
+            )
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
