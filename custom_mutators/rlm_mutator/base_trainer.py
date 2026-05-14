@@ -63,6 +63,8 @@ class BaseTrainer(Trainer):
             per_device_train_batch_size = training_cfg.train_batch_size,
             learning_rate               = training_cfg.learning_rate,
             num_train_epochs            = training_cfg.num_train_epochs,
+            warmup_ratio                = training_cfg.warmup_ratio,
+            bf16                        = training_cfg.bf16,
             save_strategy               = "no",
             report_to                   = "tensorboard" if training_cfg.enable_logging else "none",
             logging_strategy            = "steps" if training_cfg.enable_logging else "no",

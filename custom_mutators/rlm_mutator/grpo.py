@@ -59,7 +59,11 @@ class GRPOTrainer(BaseTrainer):
         clip_eps      = self.training_cfg.clip_epsilon
         ratio         = torch.exp(log_prob - old_log_prob)
         clipped_ratio = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
-        actor_loss    = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
+        per_sample    = -torch.min(ratio * advantages, clipped_ratio * advantages)
+
+        # Zero-variance groups are pre-filtered in maybe_finetune before the
+        # dataset is built, so every sample in the batch carries gradient signal.
+        actor_loss = per_sample.mean()
 
         kl_coef = self.training_cfg.kl_coef
         if kl_coef > 0.0:

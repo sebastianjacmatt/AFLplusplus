@@ -282,9 +282,82 @@ class Mutator:
         if not records:
             log.info("[mutator] maybe_finetune — buffer empty, skipping")
             return
+
+        # AFL++ may abort a seed early (e.g. on a hang), leaving the last
+        # group with fewer than group_size rewarded samples. Drop those so
+        # GroupedBatchSampler never sees an incomplete group.
+        group_size = self.training_cfg.group_size
+        if group_size > 1:
+            from collections import Counter, defaultdict
+
+            # 1. Drop incomplete groups (AFL may abort seeds early).
+            counts = Counter(r["group_id"] for r in records)
+            incomplete = {gid for gid, n in counts.items() if n != group_size}
+            if incomplete:
+                log.warning(
+                    "[mutator] dropping %d incomplete group(s) from rollout: %s",
+                    len(incomplete),
+                    sorted(incomplete),
+                )
+                records = [r for r in records if r["group_id"] not in incomplete]
+            if not records:
+                log.warning("[mutator] maybe_finetune — no complete groups after filtering, skipping")
+                return
+
+            # 2. Pre-filter zero-variance groups (all rewards identical).
+            # These produce advantage=0 for every member regardless, so their
+            # forward passes waste compute and VRAM without contributing gradient.
+            # Removing them here replaces the post-hoc active-mask in compute_loss.
+            group_rewards: dict[int, list[float]] = defaultdict(list)
+            for r in records:
+                group_rewards[r["group_id"]].append(r["reward"])
+            degenerate_gids = {
+                gid for gid, rews in group_rewards.items()
+                if max(rews) - min(rews) < 0.01
+            }
+            if degenerate_gids:
+                log.info(
+                    "[mutator] pre-filter: dropping %d zero-variance group(s) (%d samples)",
+                    len(degenerate_gids),
+                    len(degenerate_gids) * group_size,
+                )
+                records = [r for r in records if r["group_id"] not in degenerate_gids]
+            if not records:
+                log.warning("[mutator] maybe_finetune — no signal-carrying groups after pre-filter, skipping")
+                return
+
+            # 3. Trim trailing groups so total samples is divisible by batch_size.
+            batch_size = self.training_cfg.train_batch_size
+            groups_per_batch = batch_size // group_size
+            seen_gids: list[int] = []
+            seen_set: set[int] = set()
+            for r in records:
+                gid = r["group_id"]
+                if gid not in seen_set:
+                    seen_set.add(gid)
+                    seen_gids.append(gid)
+            n_complete = len(seen_gids)
+            usable = (n_complete // groups_per_batch) * groups_per_batch
+            if usable == 0:
+                log.warning("[mutator] maybe_finetune — fewer complete groups than one batch, skipping")
+                return
+            if usable < n_complete:
+                log.warning(
+                    "[mutator] maybe_finetune — trimming %d trailing group(s) to align dataset to batch_size=%d",
+                    n_complete - usable,
+                    batch_size,
+                )
+                keep_gids = set(seen_gids[:usable])
+                records = [r for r in records if r["group_id"] in keep_gids]
+
         rewarder.tf_idf.update_cycle()
         dataset = RolloutDataset(records)
         self.trainer.set_rollout_dataset(dataset)
+        # Free fragmented CUDA allocator cache from generation before training.
+        # Without this, 175+ sequential forward/backward passes fragment VRAM
+        # enough that log_softmax over the full vocab tensor can't find a
+        # contiguous block even when total reserved > total allocated.
+        torch.cuda.empty_cache()
         self.trainer.train()                        # HF Trainer rebuilds optimizer each call
         self.trainer.snapshot_ref()                 # re-anchor pi_ref after weights updated
 

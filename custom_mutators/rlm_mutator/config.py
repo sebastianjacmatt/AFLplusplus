@@ -273,6 +273,25 @@ class TrainingConfig:
         default=1,
         metadata={"help": "Number of optimizer steps between Trainer log entries."},
     )
+    warmup_ratio: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Fraction of training steps used for linear LR warmup per finetune cycle. "
+                "0.1 = first 10% of steps ramp from 0 → learning_rate. Stabilises early "
+                "updates when advantage estimates are noisiest (few valid samples in rollout)."
+            )
+        },
+    )
+    bf16: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Train in bfloat16. Halves the logits tensor (B × L × vocab) that drives "
+                "OOM on long training runs. Requires Ampere+ GPU (RTX 30xx / A100+)."
+            )
+        },
+    )
 
     # Algorithm-specific sub-configs — set by load_config(), not via JSON directly.
     ppo:  Optional[PPOConfig]  = field(default=None, metadata={"help": "PPO sub-config."})
