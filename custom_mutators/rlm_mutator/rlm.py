@@ -15,6 +15,8 @@ Model ownership lives in base_trainer.py and its PPO/GRPO subclasses.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import os
 import random
@@ -131,6 +133,21 @@ def init(seed: int) -> None:
 
     _queue_get_count = 0
     _finetune_pending = False
+
+    output_dir = TRAINER.args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+    config_out = os.path.join(output_dir, "rlm_config.json")
+    with open(config_out, "w") as fh:
+        json.dump(
+            {
+                **dataclasses.asdict(MODEL_CFG),
+                **dataclasses.asdict(AFL_CFG),
+                **dataclasses.asdict(TRAIN_CFG),
+            },
+            fh,
+            indent=2,
+        )
+    log.info("[rlm] effective config written to %s", config_out)
 
     log.info(
         "[rlm] init complete — model=%s device=%s bitmap=%d algorithm=%s",

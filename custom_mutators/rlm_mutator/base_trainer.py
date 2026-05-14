@@ -204,6 +204,14 @@ class BaseTrainer(Trainer):
     def set_rollout_dataset(self, dataset: RolloutDataset) -> None:
         self.train_dataset = dataset
 
+    def train(self, *args, **kwargs):
+        # HF Trainer.create_scheduler guards with `if self.lr_scheduler is None`,
+        # so the scheduler built on the first train() call is reused on every
+        # subsequent call — at LR=0 once its original num_training_steps are
+        # exhausted.  Resetting to None forces a fresh scheduler each cycle,
+        # sized to the current (pre-filtered) dataset.
+        self.lr_scheduler = None
+        return super().train(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # compute_loss — overridden by PPOTrainer / GRPOTrainer

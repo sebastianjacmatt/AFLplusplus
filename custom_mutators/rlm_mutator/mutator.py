@@ -114,6 +114,7 @@ class Mutator:
         # Group-batched generation cache: one entry per pending sample in the
         # current GRPO group. Refilled at every group boundary in fuzz_one.
         self._group_cache: list[_CachedSample] = []
+        self._finetune_count: int = 0
         # Set in on_new_seed when the seed tokenizes to zero tokens (empty
         # buf or all-non-decodable bytes). rlm.fuzz_count reads should_fuzz()
         # and returns 0 to AFL so fuzz() is never called for an unmaskable seed.
@@ -359,7 +360,17 @@ class Mutator:
         # contiguous block even when total reserved > total allocated.
         torch.cuda.empty_cache()
         self.trainer.train()                        # HF Trainer rebuilds optimizer each call
-        self.trainer.snapshot_ref()                 # re-anchor pi_ref after weights updated
+        self._finetune_count += 1
+        ref_every = self.training_cfg.ref_update_every
+        if self._finetune_count % ref_every == 0:
+            self.trainer.snapshot_ref()
+            log.info("[mutator] ref snapshot updated at finetune cycle %d", self._finetune_count)
+        else:
+            log.info(
+                "[mutator] ref snapshot held (cycle %d, next update at %d)",
+                self._finetune_count,
+                (self._finetune_count // ref_every + 1) * ref_every,
+            )
 
     # ------------------------------------------------------------------
     # Byte <-> token-id conversion

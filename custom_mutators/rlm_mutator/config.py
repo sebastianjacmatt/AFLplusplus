@@ -292,6 +292,17 @@ class TrainingConfig:
             )
         },
     )
+    ref_update_every: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Re-anchor pi_ref every N finetune cycles. Default 1 updates after every "
+                "cycle (original behaviour). Setting >1 holds the reference fixed for N "
+                "cycles so the KL term pulls toward a less-drifted policy, providing a "
+                "weaker validity anchor when valid_rate collapses."
+            )
+        },
+    )
 
     # Algorithm-specific sub-configs — set by load_config(), not via JSON directly.
     ppo:  Optional[PPOConfig]  = field(default=None, metadata={"help": "PPO sub-config."})
