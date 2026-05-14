@@ -344,6 +344,16 @@ class TrainingConfig:
             )
         },
     )
+    sft_adapter_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Path to a saved LoRA adapter from scripts/sft_warmup.py. "
+                "If set, the adapter is loaded into the model at init, before "
+                "the reference policy snapshot. Empty string = no warmup."
+            )
+        },
+    )
 
     # Algorithm-specific sub-configs — set by load_config(), not via JSON directly.
     ppo:  Optional[PPOConfig]  = field(default=None, metadata={"help": "PPO sub-config."})

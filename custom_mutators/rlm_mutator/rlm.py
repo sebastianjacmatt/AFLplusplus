@@ -132,19 +132,8 @@ def init(seed: int) -> None:
         validity_bonus = AFL_CFG.validity_bonus,
     )
 
-    if TRAIN_CFG.sft_corpus_path:
-        if TRAIN_CFG.sft_warmup_steps > 0:
-            log.info(
-                "[rlm] SFT warmup: %d steps from %s",
-                TRAIN_CFG.sft_warmup_steps, TRAIN_CFG.sft_corpus_path,
-            )
-            # sft_warmup also stores records in TRAINER._mlm_corpus
-            TRAINER.sft_warmup(MUTATOR._span_masker, TRAIN_CFG.sft_corpus_path, TRAIN_CFG.sft_warmup_steps)
-            TRAINER.snapshot_ref()
-            log.info("[rlm] SFT warmup done; pi_ref re-anchored to SFT checkpoint")
-        elif TRAIN_CFG.mlm_coef > 0.0:
-            # No SFT warmup, but MLM aux loss needs the corpus
-            TRAINER.load_mlm_corpus(MUTATOR._span_masker, TRAIN_CFG.sft_corpus_path)
+    if TRAIN_CFG.sft_corpus_path and TRAIN_CFG.mlm_coef > 0.0:
+        TRAINER.load_mlm_corpus(MUTATOR._span_masker, TRAIN_CFG.sft_corpus_path)
 
     _queue_get_count = 0
     _finetune_pending = False

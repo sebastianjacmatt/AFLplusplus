@@ -63,6 +63,15 @@ class BaseTrainer(Trainer):
                 task_type      = TaskType.SEQ_2_SEQ_LM,
             ))
 
+        if training_cfg.sft_adapter_path:
+            from peft.utils import set_peft_model_state_dict
+            from safetensors.torch import load_file
+            adapter_state = load_file(
+                os.path.join(training_cfg.sft_adapter_path, "adapter_model.safetensors")
+            )
+            set_peft_model_state_dict(model, adapter_state)
+            log.info("[init] loaded SFT adapter from %s", training_cfg.sft_adapter_path)
+
         args = TrainingArguments(
             output_dir                  = output_dir,
             per_device_train_batch_size = training_cfg.train_batch_size,
@@ -222,94 +231,17 @@ class BaseTrainer(Trainer):
         self.lr_scheduler = None
         return super().train(*args, **kwargs)
 
-    def _build_corpus_records(self, masker, corpus_path: str) -> list[dict]:
-        """Walk corpus_path, tokenize each file, apply masking, return SFT records.
-
-        Each record: {"input_ids": masked encoder ids, "labels": original span target ids}.
-        Shared by sft_warmup() and load_mlm_corpus() so the disk is read once.
-        """
-        records: list[dict] = []
-        for fpath in sorted(glob.glob(os.path.join(corpus_path, "**", "*"), recursive=True)):
-            if not os.path.isfile(fpath):
-                continue
-            try:
-                with open(fpath, "rb") as fh:
-                    raw = fh.read()
-                text    = raw.decode("utf-8", errors="replace")
-                tok_ids = self.tokenizer.encode(text, add_special_tokens=False)
-                if len(tok_ids) < masker.min_span_length:
-                    continue
-                masked = masker.mask(list(tok_ids))
-                if not masked.spans:
-                    continue
-                records.append({
-                    "input_ids": masked.input_ids,
-                    "labels":    masker.target_ids(masked),
-                })
-            except Exception:
-                continue
-        return records
-
     def load_mlm_corpus(self, masker, corpus_path: str) -> None:
-        """Load corpus files into _mlm_corpus for the auxiliary MLM loss during RL.
-
-        Called when mlm_coef > 0 but sft_warmup_steps == 0 so sft_warmup() is
-        not doing the loading.  Also callable standalone for corpus-only setups.
-        """
+        """Load corpus files into _mlm_corpus for the auxiliary MLM loss during RL."""
         if not corpus_path:
             return
         log.info("[sft] loading MLM corpus from %s", corpus_path)
-        records = self._build_corpus_records(masker, corpus_path)
+        records = _build_corpus_records(self.tokenizer, masker, corpus_path)
         if records:
             self._mlm_corpus = records
             log.info("[sft] %d records loaded into MLM corpus", len(records))
         else:
             log.warning("[sft] corpus_path %s yielded no valid records for MLM aux loss", corpus_path)
-
-    def sft_warmup(self, masker, corpus_path: str, n_steps: int) -> None:
-        """Run MSP SFT pre-training on a corpus of valid programs.
-
-        Each file in corpus_path is tokenized and masked with the same
-        CodeT5SpanMasker used at fuzz time, then trained with CE loss on the
-        span-reconstruction target.  The model is updated in-place; caller
-        should call snapshot_ref() afterwards to re-anchor pi_ref to the
-        SFT checkpoint.  Also stores the corpus records in _mlm_corpus so the
-        auxiliary MLM loss during RL uses the same distribution.
-        """
-        if not corpus_path or n_steps <= 0:
-            return
-
-        log.info("[sft] scanning corpus %s", corpus_path)
-        records = self._build_corpus_records(masker, corpus_path)
-        if not records:
-            log.warning("[sft] corpus_path %s yielded no valid records; skipping warmup", corpus_path)
-            return
-
-        self._mlm_corpus = records
-        log.info("[sft] %d corpus records → %d SFT steps", len(records), n_steps)
-        sft_args = TrainingArguments(
-            output_dir                  = os.path.join(self.args.output_dir, "sft_warmup"),
-            max_steps                   = n_steps,
-            per_device_train_batch_size = min(self.training_cfg.train_batch_size, len(records)),
-            learning_rate               = self.training_cfg.learning_rate,
-            warmup_ratio                = 0.1,
-            bf16                        = self.training_cfg.bf16,
-            save_strategy               = "no",
-            report_to                   = "tensorboard" if self.training_cfg.enable_logging else "none",
-            logging_strategy            = "steps" if self.training_cfg.enable_logging else "no",
-            logging_steps               = self.training_cfg.logging_steps,
-        )
-        # Use vanilla HF Trainer (not BaseTrainer) so compute_loss defaults to
-        # the model's built-in CE loss rather than our RL-specific override.
-        sft_trainer = Trainer(
-            model         = self.model,
-            args          = sft_args,
-            train_dataset = _SFTDataset(records),
-            data_collator = _SFTCollator(self.tokenizer),
-        )
-        sft_trainer.train()
-        torch.cuda.empty_cache()
-        log.info("[sft] warmup complete")
 
     # ------------------------------------------------------------------
     # compute_loss — overridden by PPOTrainer / GRPOTrainer
@@ -318,6 +250,34 @@ class BaseTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """ compute_loss: overridden by specific Policy Gradient Algorithm """
         raise NotImplementedError("Policy Gradient Algorithm must override compute_loss")
+
+
+def _build_corpus_records(tokenizer, masker, corpus_path: str) -> list[dict]:
+    """Walk corpus_path, tokenize each file, apply masking, return SFT records.
+
+    Each record: {"input_ids": masked encoder ids, "labels": original span target ids}.
+    """
+    records: list[dict] = []
+    for fpath in sorted(glob.glob(os.path.join(corpus_path, "**", "*"), recursive=True)):
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            with open(fpath, "rb") as fh:
+                raw = fh.read()
+            text    = raw.decode("utf-8", errors="replace")
+            tok_ids = tokenizer.encode(text, add_special_tokens=False)
+            if len(tok_ids) < masker.min_span_length:
+                continue
+            masked = masker.mask(list(tok_ids))
+            if not masked.spans:
+                continue
+            records.append({
+                "input_ids": masked.input_ids,
+                "labels":    masker.target_ids(masked),
+            })
+        except Exception:
+            continue
+    return records
 
 
 class _SFTDataset(Dataset):
