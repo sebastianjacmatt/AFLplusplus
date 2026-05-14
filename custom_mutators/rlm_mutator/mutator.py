@@ -115,6 +115,11 @@ class Mutator:
         # current GRPO group. Refilled at every group boundary in fuzz_one.
         self._group_cache: list[_CachedSample] = []
         self._finetune_count: int = 0
+        # Metrics updated after each finetune cycle — read by rlm.py for status logging.
+        self._last_validity_rate: float | None = None
+        self._last_usable_groups: int   | None = None
+        self._last_clip_frac:     float | None = None
+        self._last_kl_div:        float | None = None
         # Set in on_new_seed when the seed tokenizes to zero tokens (empty
         # buf or all-non-decodable bytes). rlm.fuzz_count reads should_fuzz()
         # and returns 0 to AFL so fuzz() is never called for an unmaskable seed.
@@ -191,13 +196,6 @@ class Mutator:
         # at sampling collapse (model too peaky / RNG not advancing); diverging
         # y_t with identical executed_program bytes points at tokenizer-decode
         # collapse. Cheap to leave in; trim or move to debug level once stable.
-        log.info(
-            "[mut] %s group=%d logp=%.3f y_t[:8]=%s",
-            sample_id,
-            self._group,
-            cached.old_logprob,
-            cached.y_t[:8],
-        )
         self.buffer.log(
             sample_id        = sample_id,
             group_id         = self._group,
@@ -281,8 +279,11 @@ class Mutator:
         """
         records = self.buffer.flush()
         if not records:
-            log.info("[mutator] maybe_finetune — buffer empty, skipping")
             return
+
+        n_total = len(records)
+        n_valid = sum(1 for r in records if r.get("reward", -1.0) >= 0.0)
+        self._last_validity_rate = n_valid / n_total if n_total else 0.0
 
         # AFL++ may abort a seed early (e.g. on a hang), leaving the last
         # group with fewer than group_size rewarded samples. Drop those so
@@ -317,11 +318,6 @@ class Mutator:
                 if max(rews) - min(rews) < 0.01
             }
             if degenerate_gids:
-                log.info(
-                    "[mutator] pre-filter: dropping %d zero-variance group(s) (%d samples)",
-                    len(degenerate_gids),
-                    len(degenerate_gids) * group_size,
-                )
                 records = [r for r in records if r["group_id"] not in degenerate_gids]
             if not records:
                 log.warning("[mutator] maybe_finetune — no signal-carrying groups after pre-filter, skipping")
@@ -338,6 +334,7 @@ class Mutator:
                     seen_set.add(gid)
                     seen_gids.append(gid)
             n_complete = len(seen_gids)
+            self._last_usable_groups = n_complete
             usable = (n_complete // groups_per_batch) * groups_per_batch
             if usable == 0:
                 log.warning("[mutator] maybe_finetune — fewer complete groups than one batch, skipping")
@@ -360,17 +357,19 @@ class Mutator:
         # contiguous block even when total reserved > total allocated.
         torch.cuda.empty_cache()
         self.trainer.train()                        # HF Trainer rebuilds optimizer each call
+
+        last = {}
+        for entry in reversed(self.trainer.state.log_history):
+            for k, v in entry.items():
+                if k not in last:
+                    last[k] = v
+        self._last_clip_frac = last.get("train/clip_fraction")
+        self._last_kl_div    = last.get("train/kl_mean")
+
         self._finetune_count += 1
         ref_every = self.training_cfg.ref_update_every
         if self._finetune_count % ref_every == 0:
             self.trainer.snapshot_ref()
-            log.info("[mutator] ref snapshot updated at finetune cycle %d", self._finetune_count)
-        else:
-            log.info(
-                "[mutator] ref snapshot held (cycle %d, next update at %d)",
-                self._finetune_count,
-                (self._finetune_count // ref_every + 1) * ref_every,
-            )
 
     # ------------------------------------------------------------------
     # Byte <-> token-id conversion

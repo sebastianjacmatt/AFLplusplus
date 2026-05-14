@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import random
+import sys
 from typing import Optional
 
 from config import AFLConfig, ModelConfig, TrainingConfig, load_config
@@ -131,6 +132,20 @@ def init(seed: int) -> None:
         validity_bonus = AFL_CFG.validity_bonus,
     )
 
+    if TRAIN_CFG.sft_corpus_path:
+        if TRAIN_CFG.sft_warmup_steps > 0:
+            log.info(
+                "[rlm] SFT warmup: %d steps from %s",
+                TRAIN_CFG.sft_warmup_steps, TRAIN_CFG.sft_corpus_path,
+            )
+            # sft_warmup also stores records in TRAINER._mlm_corpus
+            TRAINER.sft_warmup(MUTATOR._span_masker, TRAIN_CFG.sft_corpus_path, TRAIN_CFG.sft_warmup_steps)
+            TRAINER.snapshot_ref()
+            log.info("[rlm] SFT warmup done; pi_ref re-anchored to SFT checkpoint")
+        elif TRAIN_CFG.mlm_coef > 0.0:
+            # No SFT warmup, but MLM aux loss needs the corpus
+            TRAINER.load_mlm_corpus(MUTATOR._span_masker, TRAIN_CFG.sft_corpus_path)
+
     _queue_get_count = 0
     _finetune_pending = False
 
@@ -147,15 +162,6 @@ def init(seed: int) -> None:
             fh,
             indent=2,
         )
-    log.info("[rlm] effective config written to %s", config_out)
-
-    log.info(
-        "[rlm] init complete — model=%s device=%s bitmap=%d algorithm=%s",
-        MODEL_CFG.model_name_or_path,
-        MODEL_CFG.resolve_device(),
-        AFL_CFG.bitmap_size,
-        TRAIN_CFG.algorithm,
-    )
 
 
 def deinit() -> None:
@@ -165,9 +171,8 @@ def deinit() -> None:
 
     records = BUFFER.flush()
     if records:
-        log.info("[rlm] deinit — logged %d remaining rollout records", len(records))
+        log.warning("[rlm] deinit — %d rollout records unflushed", len(records))
 
-    log.info("[rlm] deinit — saving model checkpoint to %s", MUTATOR.trainer.args.output_dir)
     MUTATOR.trainer.save_model()
 
 
@@ -188,6 +193,19 @@ def queue_get(filename: str) -> bool:
 
     if _queue_get_count > 0 and _queue_get_count % AFL_CFG.finetune_every == 0:
         _finetune_pending = True
+
+    groups_until_ft = AFL_CFG.finetune_every - (_queue_get_count % AFL_CFG.finetune_every or AFL_CFG.finetune_every)
+    m = MUTATOR
+    sys.stderr.write(
+        "\r[rlm] ft_in=%-2d  valid=%-5s  clip=%-5s  kl=%-7s  usable=%-4s   " % (
+            groups_until_ft,
+            ("%.1f%%" % (m._last_validity_rate * 100)) if m and m._last_validity_rate is not None else "n/a",
+            ("%.3f"  %  m._last_clip_frac)             if m and m._last_clip_frac     is not None else "n/a",
+            ("%+.4f" %  m._last_kl_div)                if m and m._last_kl_div        is not None else "n/a",
+            str(m._last_usable_groups)                 if m and m._last_usable_groups  is not None else "n/a",
+        )
+    )
+    sys.stderr.flush()
 
     return True
 

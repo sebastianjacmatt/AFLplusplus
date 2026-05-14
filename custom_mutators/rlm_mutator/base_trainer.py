@@ -10,11 +10,14 @@ Mutator handles tokenization, rollouts and dataset creation.
 """
 
 import copy
+import glob
+import logging
 import os
+import random
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, SequentialSampler
+from torch.utils.data import DataLoader, Dataset, SequentialSampler
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -24,6 +27,8 @@ from transformers import (
 
 from config  import ModelConfig, TrainingConfig
 from rollout import GroupedBatchSampler, RolloutCollator, RolloutDataset
+
+log = logging.getLogger(__name__)
 
 
 class BaseTrainer(Trainer):
@@ -82,6 +87,7 @@ class BaseTrainer(Trainer):
         self.model_cfg    = model_cfg
         self.training_cfg = training_cfg
         self._ref_model   = None
+        self._mlm_corpus: list[dict] = []
         self.snapshot_ref()
 
     def snapshot_ref(self) -> None:
@@ -90,6 +96,8 @@ class BaseTrainer(Trainer):
         First call: full deepcopy (needed for both full-FT and LoRA to allocate
         the reference model).  Subsequent calls with LoRA active: copy only the
         adapter weights into the existing ref, leaving the frozen base intact.
+        Reference is always set to eval mode so dropout is disabled — ensuring
+        ref_log_prob is deterministic and KL ≈ 0 at training step 0.
         """
         if self._ref_model is None:
             self._ref_model = copy.deepcopy(self.model)
@@ -97,6 +105,7 @@ class BaseTrainer(Trainer):
             _copy_lora_weights(self.model, self._ref_model)
         else:
             self._ref_model = copy.deepcopy(self.model)
+        self._ref_model.eval()
 
     def ref_logprob(self, x_t: list[int], y_t: list[int]) -> float:
         """mean per-token log-probability pi_ref(y_t | x_t)."""
@@ -213,6 +222,95 @@ class BaseTrainer(Trainer):
         self.lr_scheduler = None
         return super().train(*args, **kwargs)
 
+    def _build_corpus_records(self, masker, corpus_path: str) -> list[dict]:
+        """Walk corpus_path, tokenize each file, apply masking, return SFT records.
+
+        Each record: {"input_ids": masked encoder ids, "labels": original span target ids}.
+        Shared by sft_warmup() and load_mlm_corpus() so the disk is read once.
+        """
+        records: list[dict] = []
+        for fpath in sorted(glob.glob(os.path.join(corpus_path, "**", "*"), recursive=True)):
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                with open(fpath, "rb") as fh:
+                    raw = fh.read()
+                text    = raw.decode("utf-8", errors="replace")
+                tok_ids = self.tokenizer.encode(text, add_special_tokens=False)
+                if len(tok_ids) < masker.min_span_length:
+                    continue
+                masked = masker.mask(list(tok_ids))
+                if not masked.spans:
+                    continue
+                records.append({
+                    "input_ids": masked.input_ids,
+                    "labels":    masker.target_ids(masked),
+                })
+            except Exception:
+                continue
+        return records
+
+    def load_mlm_corpus(self, masker, corpus_path: str) -> None:
+        """Load corpus files into _mlm_corpus for the auxiliary MLM loss during RL.
+
+        Called when mlm_coef > 0 but sft_warmup_steps == 0 so sft_warmup() is
+        not doing the loading.  Also callable standalone for corpus-only setups.
+        """
+        if not corpus_path:
+            return
+        log.info("[sft] loading MLM corpus from %s", corpus_path)
+        records = self._build_corpus_records(masker, corpus_path)
+        if records:
+            self._mlm_corpus = records
+            log.info("[sft] %d records loaded into MLM corpus", len(records))
+        else:
+            log.warning("[sft] corpus_path %s yielded no valid records for MLM aux loss", corpus_path)
+
+    def sft_warmup(self, masker, corpus_path: str, n_steps: int) -> None:
+        """Run MSP SFT pre-training on a corpus of valid programs.
+
+        Each file in corpus_path is tokenized and masked with the same
+        CodeT5SpanMasker used at fuzz time, then trained with CE loss on the
+        span-reconstruction target.  The model is updated in-place; caller
+        should call snapshot_ref() afterwards to re-anchor pi_ref to the
+        SFT checkpoint.  Also stores the corpus records in _mlm_corpus so the
+        auxiliary MLM loss during RL uses the same distribution.
+        """
+        if not corpus_path or n_steps <= 0:
+            return
+
+        log.info("[sft] scanning corpus %s", corpus_path)
+        records = self._build_corpus_records(masker, corpus_path)
+        if not records:
+            log.warning("[sft] corpus_path %s yielded no valid records; skipping warmup", corpus_path)
+            return
+
+        self._mlm_corpus = records
+        log.info("[sft] %d corpus records → %d SFT steps", len(records), n_steps)
+        sft_args = TrainingArguments(
+            output_dir                  = os.path.join(self.args.output_dir, "sft_warmup"),
+            max_steps                   = n_steps,
+            per_device_train_batch_size = min(self.training_cfg.train_batch_size, len(records)),
+            learning_rate               = self.training_cfg.learning_rate,
+            warmup_ratio                = 0.1,
+            bf16                        = self.training_cfg.bf16,
+            save_strategy               = "no",
+            report_to                   = "tensorboard" if self.training_cfg.enable_logging else "none",
+            logging_strategy            = "steps" if self.training_cfg.enable_logging else "no",
+            logging_steps               = self.training_cfg.logging_steps,
+        )
+        # Use vanilla HF Trainer (not BaseTrainer) so compute_loss defaults to
+        # the model's built-in CE loss rather than our RL-specific override.
+        sft_trainer = Trainer(
+            model         = self.model,
+            args          = sft_args,
+            train_dataset = _SFTDataset(records),
+            data_collator = _SFTCollator(self.tokenizer),
+        )
+        sft_trainer.train()
+        torch.cuda.empty_cache()
+        log.info("[sft] warmup complete")
+
     # ------------------------------------------------------------------
     # compute_loss — overridden by PPOTrainer / GRPOTrainer
     # ------------------------------------------------------------------
@@ -220,6 +318,46 @@ class BaseTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """ compute_loss: overridden by specific Policy Gradient Algorithm """
         raise NotImplementedError("Policy Gradient Algorithm must override compute_loss")
+
+
+class _SFTDataset(Dataset):
+    """Thin Dataset wrapper for SFT warmup records."""
+
+    def __init__(self, records: list[dict]):
+        self._records = records
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self._records[idx]
+
+
+class _SFTCollator:
+    """Pad and stack SFT records into tensors for the vanilla HF Trainer."""
+
+    def __init__(self, tokenizer):
+        self.pad_id = tokenizer.pad_token_id
+        self.eos_id = tokenizer.eos_token_id
+
+    def __call__(self, batch: list[dict]) -> dict:
+        b     = len(batch)
+        max_x = max(len(r["input_ids"]) for r in batch)
+        max_y = max(len(r["labels"])    for r in batch) + 1  # +1 for EOS
+
+        input_ids = torch.full((b, max_x), self.pad_id, dtype=torch.long)
+        attn_mask = torch.zeros((b, max_x),              dtype=torch.long)
+        labels    = torch.full((b, max_y), -100,         dtype=torch.long)
+
+        for i, r in enumerate(batch):
+            x = r["input_ids"]
+            y = r["labels"] + [self.eos_id]
+            input_ids[i, :len(x)] = torch.tensor(x, dtype=torch.long)
+            attn_mask[i, :len(x)] = 1
+            labels[i,    :len(y)] = torch.tensor(y, dtype=torch.long)
+
+        return {"input_ids": input_ids, "attention_mask": attn_mask, "labels": labels}
+
 
 def _copy_lora_weights(src, dst) -> None:
     """Copy only lora_ keys from src state_dict into dst — O(|phi|), not O(|theta|)."""

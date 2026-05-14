@@ -201,6 +201,17 @@ class GRPOConfig:
         default=1e-8,
         metadata={"help": "Std stabiliser in GRPO group advantage normalisation."},
     )
+    advantage_clip: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Clip |A| ≤ advantage_clip before computing the policy loss. "
+                "Prevents one-off valid samples in mostly-invalid groups from "
+                "dominating gradients with advantages of magnitude 4-5+. "
+                "0.0 disables clipping. Recommended: 3.0."
+            )
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +311,36 @@ class TrainingConfig:
                 "cycle (original behaviour). Setting >1 holds the reference fixed for N "
                 "cycles so the KL term pulls toward a less-drifted policy, providing a "
                 "weaker validity anchor when valid_rate collapses."
+            )
+        },
+    )
+    mlm_coef: float = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "Auxiliary CE loss coefficient on valid rollout samples (reward >= 0). "
+                "Gives direct supervised signal: 'reproduce what you generated that was valid.' "
+                "This is dense (all tokens of all valid sequences) and fires regardless of "
+                "within-group reward variance. 0.0 disables. Start at 0.1."
+            )
+        },
+    )
+    sft_corpus_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Directory of valid program files for MSP SFT warmup before RL begins. "
+                "Each file is tokenized, masked with the same distribution used at fuzz time, "
+                "and used as a CE training example. Empty string disables warmup."
+            )
+        },
+    )
+    sft_warmup_steps: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Number of optimizer steps for the SFT pre-training warmup pass. "
+                "Recommended 2000-5000. 0 disables. Requires sft_corpus_path to be set."
             )
         },
     )
