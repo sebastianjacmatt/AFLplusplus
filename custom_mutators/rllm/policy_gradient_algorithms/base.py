@@ -1,6 +1,7 @@
 """Protocol and shared helpers for policy-gradient strategies.
 
 See docs/design.md §2.4 (Strategy pattern) and §3.6.
+See docs/design2.md §3.3 for the pre_finetune / save_auxiliary extensions.
 """
 
 from typing import TYPE_CHECKING, Optional, Protocol
@@ -10,19 +11,26 @@ from torch.utils.data import Dataset, Sampler
 
 if TYPE_CHECKING:
     from config import Config
+    from rollout import RolloutDataset
 
 
 LABEL_IGNORE = -100
 
 
 class PolicyGradientAlgorithm(Protocol):
-    """Structural interface implemented by PPO / GRPO / future algorithms.
+    """Structural interface implemented by PPO / GRPO / CriticDecorator.
 
-    Two hooks (docs/design.md §2.5, §6.3):
+    Four hooks:
 
-    * ``loss`` — the policy-gradient loss for one batch.
-    * ``make_sampler`` — optional custom training sampler. Default ``None``
-      tells ``BaseTrainer`` to defer to HF Trainer's default.
+    * ``loss``          — the policy-gradient loss for one batch.
+    * ``make_sampler``  — optional custom training sampler; ``None`` defers
+                          to HF Trainer's default (docs/design.md §6.3).
+    * ``pre_finetune``  — called before actor training each cycle; used by
+                          ``CriticDecorator`` to train the critic
+                          (docs/design2.md §3.2). No-op on PPO / GRPO.
+    * ``save_auxiliary`` — called from ``BaseTrainer.save_checkpoint`` to
+                           persist any auxiliary models (e.g. the critic).
+                           No-op on PPO / GRPO.
     """
 
     def loss(
@@ -38,6 +46,14 @@ class PolicyGradientAlgorithm(Protocol):
         dataset: Dataset,
         cfg: "Config",
     ) -> Optional[Sampler]: ...
+
+    def pre_finetune(
+        self,
+        dataset: "RolloutDataset",
+        cfg: "Config",
+    ) -> None: ...
+
+    def save_auxiliary(self, output_dir: str) -> None: ...
 
 
 def token_logprobs(

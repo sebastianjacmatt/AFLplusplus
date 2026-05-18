@@ -88,9 +88,15 @@ class BaseTrainer(Trainer):
         return (loss, model_out) if return_outputs else loss
 
     def finetune(self, dataset: RolloutDataset) -> None:
-        """One on-policy training cycle."""
+        """One on-policy training cycle.
+
+        Phase 1: critic training (no-op unless CriticDecorator is active).
+        Phase 2: actor training via HF Trainer.
+        """
         if len(dataset) == 0:
             return
+
+        self.algorithm.pre_finetune(dataset, self.cfg)
 
         self.train_dataset = dataset
         self.model.train()
@@ -105,6 +111,7 @@ class BaseTrainer(Trainer):
 
     def save_checkpoint(self) -> None:
         self.save_model()
+        self.algorithm.save_auxiliary(self.args.output_dir)
 
     @staticmethod
     def _snapshot_reference(model: torch.nn.Module) -> torch.nn.Module:

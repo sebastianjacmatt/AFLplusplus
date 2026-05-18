@@ -39,6 +39,22 @@ class GRPOConfig:
     advantage_clip: float = 0.0
 
 
+@dataclass
+class CriticConfig:
+    # Backbone: encoder half of a T5-family model; "" → random T5Config (cheap).
+    model_name: str = "Salesforce/codet5p-220m"
+    critic_lr: float = 1e-4
+    critic_epochs: int = 1
+    num_labels: int = 8
+    # How much of the reward comes from the critic vs. the raw environment signal.
+    # 1.0 = pure critic (CovRL-style); 0.0 = no critic influence.
+    reward_weight: float = 1.0
+    # len(bucket_thresholds) must equal num_labels - 1.
+    bucket_thresholds: list = field(default_factory=lambda: [-0.5, 0.0, 0.5, 0.6, 0.7, 0.8, 0.9])
+    # len(bucket_values) must equal num_labels.
+    bucket_values: list = field(default_factory=lambda: [-1.0, -0.5, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+
+
 # ---------------------------------------------------------------------------
 # Unified config
 # ---------------------------------------------------------------------------
@@ -92,6 +108,10 @@ class Config:
     # Populated by load_config based on policy_gradient_algorithm.
     ppo:  Optional[PPOConfig]  = None
     grpo: Optional[GRPOConfig] = None
+
+    # Critic (optional). Populated by load_config when use_critic=True.
+    use_critic:  bool                    = False
+    critic_cfg:  Optional[CriticConfig]  = None
 
     def resolve_device(self) -> str:
         if self.device == "auto":
@@ -154,5 +174,18 @@ def load_config(config_path: str | None = None) -> Config:
             f"policy_gradient_algorithm must be 'ppo' or 'grpo', "
             f"got {cfg.policy_gradient_algorithm!r}."
         )
+
+    if cfg.use_critic:
+        cfg.critic_cfg = CriticConfig(**_sub_kwargs(raw, CriticConfig))
+        if len(cfg.critic_cfg.bucket_thresholds) != cfg.critic_cfg.num_labels - 1:
+            raise ValueError(
+                f"len(bucket_thresholds) ({len(cfg.critic_cfg.bucket_thresholds)}) "
+                f"must equal num_labels - 1 ({cfg.critic_cfg.num_labels - 1})."
+            )
+        if len(cfg.critic_cfg.bucket_values) != cfg.critic_cfg.num_labels:
+            raise ValueError(
+                f"len(bucket_values) ({len(cfg.critic_cfg.bucket_values)}) "
+                f"must equal num_labels ({cfg.critic_cfg.num_labels})."
+            )
 
     return cfg

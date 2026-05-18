@@ -2,13 +2,16 @@
 
 The factory absorbs the ``cfg.policy_gradient_algorithm`` branch so the
 adapter in ``rllm.py`` stays algorithm-agnostic (docs/design.md §3.7).
-Adding a new algorithm = add a class here + add a sub-config dataclass
-in ``config.py`` + extend this factory. No other file changes.
+
+When ``cfg.use_critic`` is True the selected algorithm is wrapped in a
+``CriticDecorator`` (docs/design2.md §2), giving PPO+Critic or GRPO+Critic
+without modifying either base algorithm.
 """
 
 from typing import TYPE_CHECKING
 
 from .base import PolicyGradientAlgorithm
+from .critic_decorator import CriticDecorator
 from .grpo import GRPOAlgorithm
 from .ppo import PPOAlgorithm
 
@@ -18,12 +21,25 @@ if TYPE_CHECKING:
 
 def build_algorithm(cfg: "Config") -> PolicyGradientAlgorithm:
     if cfg.policy_gradient_algorithm == "ppo":
-        return PPOAlgorithm()
-    if cfg.policy_gradient_algorithm == "grpo":
-        return GRPOAlgorithm()
-    raise ValueError(
-        f"Unknown policy_gradient_algorithm: {cfg.policy_gradient_algorithm!r}"
-    )
+        algo: PolicyGradientAlgorithm = PPOAlgorithm()
+    elif cfg.policy_gradient_algorithm == "grpo":
+        algo = GRPOAlgorithm()
+    else:
+        raise ValueError(
+            f"Unknown policy_gradient_algorithm: {cfg.policy_gradient_algorithm!r}"
+        )
+
+    if cfg.use_critic:
+        from critic import Critic
+        algo = CriticDecorator(algo, Critic(cfg.critic_cfg), cfg)
+
+    return algo
 
 
-__all__ = ["PolicyGradientAlgorithm", "PPOAlgorithm", "GRPOAlgorithm", "build_algorithm"]
+__all__ = [
+    "PolicyGradientAlgorithm",
+    "PPOAlgorithm",
+    "GRPOAlgorithm",
+    "CriticDecorator",
+    "build_algorithm",
+]

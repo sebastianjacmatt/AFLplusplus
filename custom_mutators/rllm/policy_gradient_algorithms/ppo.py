@@ -21,6 +21,12 @@ class PPOAlgorithm:
     def make_sampler(self, dataset: Dataset, cfg: "Config") -> Optional[Sampler]:
         return None
 
+    def pre_finetune(self, dataset, cfg) -> None:
+        return None
+
+    def save_auxiliary(self, output_dir: str) -> None:
+        return None
+
     def loss(
         self,
         inputs: dict[str, torch.Tensor],
