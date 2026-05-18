@@ -1,0 +1,34 @@
+{
+  "_comment": "Perf sweep — group_size=8 leg (baseline of the batching sweep). Ported from rlm_mutator/configs/group_size_perf/perf_g_8.json: LoRA fields removed (rllm loads the full model); 'algorithm' renamed to 'policy_gradient_algorithm' to match the unified Config in rllm/config.py. Lever: batch width via group_size; everything else pinned at CodeT5+/CovRL-anchored neutrals so perf is the only thing varying across legs (g=8/16/32). Anchors: mask_probability=0.15 + mean_span_length=3 + max_span_length=5 (CodeT5 §3.2). top_k=32 (CovRL §4). temperature=1.0 / top_p=0.95. max_new_tokens_per_mask=5 aligned with max_span_length per CodeT5 §3.2. fuzz_count=512 is a multiple of all three sweep values (gives 64/32/16 batched generates per seed at g=8/16/32). finetune_every=16 keeps the throughput number a mutation-throughput number, not a finetune-throughput number. Headline metrics: total LLM samples/sec, peak VRAM, GPU% during mutation phases. Budget: 20 min.",
+
+  "model_name_or_path": "Salesforce/codet5p-220m",
+  "device":             "cuda",
+  "max_length":         512,
+  "mask_probability":   0.15,
+  "mean_span_length":   3,
+  "min_span_length":    1,
+  "max_span_length":    5,
+  "top_k":              32,
+  "top_p":              0.95,
+  "temperature":        1.0,
+  "max_new_tokens_per_mask": 5,
+
+  "fuzz_count":     512,
+  "mask_strategy":  "span",
+  "bitmap_size":    131072,
+  "idf_alpha":      0.6,
+  "finetune_every": 16,
+
+  "policy_gradient_algorithm": "grpo",
+  "learning_rate":    1e-4,
+  "train_batch_size": 8,
+  "num_train_epochs": 1,
+  "kl_coef":          0.01,
+  "clip_epsilon":     0.2,
+
+  "group_size":   8,
+  "norm_epsilon": 1e-8,
+
+  "enable_logging": true,
+  "logging_steps":  1
+}
