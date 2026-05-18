@@ -66,6 +66,7 @@ def queue_get(filename: str) -> bool:
     global _queue_get_count
     _queue_get_count += 1
     if _queue_get_count % CFG.finetune_every == 0:
+        REWARDER.update_cycle()
         TRAINER.finetune(RolloutDataset(BUFFER))
     return True
 
