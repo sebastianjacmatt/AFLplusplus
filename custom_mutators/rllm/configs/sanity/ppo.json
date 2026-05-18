@@ -1,0 +1,32 @@
+{
+  "_comment": "Sanity test for PPO correctness. Mirrors sanity/grpo.json on every non-RL knob (same model, same sampling settings, same fuzz/batch sizes, same logging) so a side-by-side run of the two configs isolates algorithm behaviour from everything else. (1) Sampling warpers disabled (top_k=0, top_p=1.0, T=1.0) — importance ratios start at exactly 1.0, so logprob bugs surface immediately. (2) train_batch_size=16 keeps the batch-mean baseline easy to verify: A_i = reward_i - mean(rewards). (3) entropy_coef=0.01 is non-zero so the entropy bonus contributes a visible term in the logged loss; flip to 0.0 to confirm it drops out cleanly. (4) clip_epsilon=0.2 is the standard PPO clip bound. (5) cfg.ppo.value_coef and cfg.ppo.gae_lambda are placeholders: the current PPO implementation in ppo.py is critic-free (REINFORCE-with-baseline + clipping), so these are unused at runtime; populated here for forward compatibility when a value head is added. (6) ref_update_every=2 exercises the reference-policy refresh on the 2nd finetune cycle. (7) fp32 for bit-exact comparability across runs. Memory on RTX 3090 (24 GB): same envelope as the GRPO leg — ~3 GB stable, transient peaks under 2 GB.",
+
+  "model_name_or_path": "Salesforce/codet5p-220m",
+  "device":             "cuda",
+  "max_length":         256,
+  "top_k":              0,
+  "top_p":              1.0,
+  "temperature":        1.0,
+  "max_new_tokens_per_mask": 8,
+
+  "fuzz_count":     32,
+  "mask_strategy":  "span",
+  "bitmap_size":    65536,
+  "idf_alpha":      0.6,
+  "finetune_every": 4,
+
+  "policy_gradient_algorithm": "ppo",
+  "learning_rate":    1e-4,
+  "train_batch_size": 16,
+  "num_train_epochs": 1,
+  "kl_coef":          0.01,
+  "clip_epsilon":     0.2,
+  "ref_update_every": 2,
+
+  "value_coef":   0.5,
+  "entropy_coef": 0.01,
+  "gae_lambda":   0.95,
+
+  "enable_logging": true,
+  "logging_steps":  1
+}

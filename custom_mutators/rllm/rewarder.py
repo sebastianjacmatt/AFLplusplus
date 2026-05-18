@@ -22,22 +22,35 @@ if TYPE_CHECKING:
 
 
 class _SharedMemoryBitmap:
-    """Attach AFL++'s SysV shared coverage bitmap via ``__AFL_SHM_ID``."""
+    """Attach AFL++'s SysV shared coverage bitmap via ``__AFL_SHM_ID``.
+
+    The attach is deferred to the first ``read()`` call because afl-fuzz
+    exports ``__AFL_SHM_ID`` *after* it invokes the Python mutator's
+    ``init()`` — construction-time attach would race that ordering and
+    crash with "__AFL_SHM_ID not set" during startup.
+    """
 
     def __init__(self, size: int) -> None:
+        self.size = size
+        self._buf = None
+
+    def _attach(self) -> None:
         shm_id_str = os.environ.get("__AFL_SHM_ID")
         if not shm_id_str:
             raise RuntimeError(
-                "__AFL_SHM_ID not set; the rewarder must run under afl-fuzz."
+                "__AFL_SHM_ID not set at first bitmap read; expected to be "
+                "exported by afl-fuzz by the time post_run() fires."
             )
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.shmat.restype = ctypes.c_void_p
         addr = libc.shmat(int(shm_id_str), None, 0)
         if addr is None or addr == ctypes.c_void_p(-1).value:
             raise OSError(ctypes.get_errno(), "shmat failed")
-        self._buf = (ctypes.c_ubyte * size).from_address(addr)
+        self._buf = (ctypes.c_ubyte * self.size).from_address(addr)
 
     def read(self) -> np.ndarray:
+        if self._buf is None:
+            self._attach()
         return np.frombuffer(self._buf, dtype=np.uint8).copy()
 
 

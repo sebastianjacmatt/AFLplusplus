@@ -1,0 +1,32 @@
+{
+  "_comment": "Sanity test for GRPO correctness. Designed to make every math path visible and easy to verify by eye. (1) Sampling warpers disabled — top_k=0, top_p=1.0, temperature=1.0 — so the sample-time distribution equals the raw model distribution. Importance ratios start at exactly 1.0, which makes any logprob bug surface immediately as a non-1 starting ratio. (2) Small fuzz_count and small batch size keep tensors humanly inspectable: fuzz_count=32 (= 8 groups of 4 per mask() call), train_batch_size=16 (= 4 groups per training batch). The (B,)→(B/G,G) reshape in grpo.py is therefore (16,)→(4,4), trivial to verify in a debugger. (3) advantage_clip=3.0 is finite so the clamp path executes (set to 0.0 to skip it). norm_epsilon=1e-8 keeps a degenerate all-equal-rewards group from blowing up. (4) ref_update_every=2 exercises the reference-policy refresh on the 2nd finetune cycle. (5) finetune_every=4 fires training cycles every few queue entries so a short run produces multiple finetunes to inspect. (6) fp32 (bf16=false): correctness over speed; logged losses are bit-exact comparable across runs. Memory on RTX 3090 (24 GB): ~3 GB stable (policy + ref + Adam) + transient peaks under 2 GB during generate/train. Plenty of headroom.",
+
+  "model_name_or_path": "Salesforce/codet5p-220m",
+  "device":             "cuda",
+  "max_length":         256,
+  "top_k":              0,
+  "top_p":              1.0,
+  "temperature":        1.0,
+  "max_new_tokens_per_mask": 8,
+
+  "fuzz_count":     32,
+  "mask_strategy":  "span",
+  "bitmap_size":    65536,
+  "idf_alpha":      0.6,
+  "finetune_every": 4,
+
+  "policy_gradient_algorithm": "grpo",
+  "learning_rate":    1e-4,
+  "train_batch_size": 16,
+  "num_train_epochs": 1,
+  "kl_coef":          0.01,
+  "clip_epsilon":     0.2,
+  "ref_update_every": 2,
+
+  "group_size":     4,
+  "norm_epsilon":   1e-8,
+  "advantage_clip": 3.0,
+
+  "enable_logging": true,
+  "logging_steps":  1
+}
