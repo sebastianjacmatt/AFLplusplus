@@ -8,7 +8,7 @@
 - $t$: cycle counter, starts at 0
 
 **Inputs:** seed queue $Q$, finetuning dataset $\mathcal{D}_T$, corpus $\mathcal{C}$  
-**Hyperparameters:** `iter_cycle`, `fuzz_count`, `corpus_ratio` $\rho$
+**Hyperparameters:** `iter_cycle`, `fuzz_count`
 
 ---
 
@@ -57,12 +57,12 @@
 
 ## Corpus mixing
 
-**Function** $\text{MixCorpus}(\mathcal{D}_T, \mathcal{C}, \rho)$:
+**Function** $\text{MixCorpus}(\mathcal{D}_T, \mathcal{C})$:
 
-1.  Sample $\rho \cdot |\mathcal{D}_T|$ entries from $\mathcal{C}$, each with reward $0$
+1.  Sample $4 \cdot |\mathcal{D}_T|$ entries from $\mathcal{C}$, score each with TF-IDF using the current IDF (without updating it)
 2.  **return** $\mathcal{D}_T \cup \mathcal{C}_{sample}$
 
-Corpus samples receive a sentinel reward of $0$ and are interleaved with rollouts in every training batch.
+Corpus samples are scored using the frozen IDF — they do not contribute to IDF updates — and are interleaved with rollouts in every training batch.
 
 ---
 
@@ -79,15 +79,15 @@ Corpus samples receive a sentinel reward of $0$ and are interleaved with rollout
 7.  $\quad \theta \leftarrow \theta - \eta \nabla_\theta \mathcal{L}$
 8.  **return** $\mathcal{M}_\theta$
 
-Both $\mathcal{L}_{policy}$ and $\mathcal{L}_{CE}$ are taken over the full batch including corpus samples. Corpus samples contribute zero to $\mathcal{L}_{policy}$ (since $\hat{R} = 0$) but participate in the mean. The reward function $\mathcal{R}$ and the policy loss $\text{PolicyLoss}$ are abstract — concrete instances are given below.
+Both $\mathcal{L}_{policy}$ and $\mathcal{L}_{CE}$ are taken over the full batch including corpus samples. The reward function $\mathcal{R}$ and the policy loss $\text{PolicyLoss}$ are abstract — concrete instances are given below.
 
 ---
 
 ## Reward functions
 
-**$\mathcal{R}_{learned}(x, y, R)$:** if $(x, y)$ is a rollout, query the trained rewarder and map its predicted class to a scalar; if $(x, y)$ is a corpus sample, return $0$.
+**$\mathcal{R}_{learned}(x, y, R)$:** query the trained rewarder on $(x, y)$ and map its predicted class to a scalar. Applied to all samples (rollout and corpus alike).
 
-**$\mathcal{R}_{direct}(x, y, R)$:** if $(x, y)$ is a rollout, return the stored $R$; if $(x, y)$ is a corpus sample, return $0$.
+**$\mathcal{R}_{direct}(x, y, R)$:** return the stored $R$. Applied to all samples; corpus samples carry a TF-IDF score computed under the frozen IDF.
 
 ---
 
@@ -113,7 +113,7 @@ $$
 
 **Function** $\text{FinetuneCovRL}(\mathcal{D}_T, \mathcal{C}, t)$:
 
-1.  $\mathcal{D}_{mix} \leftarrow \text{MixCorpus}(\mathcal{D}_T, \mathcal{C}, \rho)$
+1.  $\mathcal{D}_{mix} \leftarrow \text{MixCorpus}(\mathcal{D}_T, \mathcal{C})$
 2.  $\mathcal{R}_{cur} \leftarrow \text{FinetuneRewarder}(\mathcal{R}_{cur}, \mathcal{D}_T)$
 3.  **if** $t > 0$ **then** $\mathcal{M}_{cur} \leftarrow \text{FinetuneMutator}(\mathcal{M}_{cur}, \mathcal{R}_{learned}, \mathcal{D}_{mix})$
 
@@ -123,7 +123,7 @@ The rewarder is trained on unmixed $\mathcal{D}_T$ as an 8-class classifier over
 
 **Function** $\text{FinetuneRLLM}(\mathcal{D}_T, \mathcal{C}, t)$:
 
-1.  $\mathcal{D}_{mix} \leftarrow \text{MixCorpus}(\mathcal{D}_T, \mathcal{C}, \rho)$
+1.  $\mathcal{D}_{mix} \leftarrow \text{MixCorpus}(\mathcal{D}_T, \mathcal{C})$
 2.  $\mathcal{M}_{cur} \leftarrow \text{FinetuneMutator}(\mathcal{M}_{cur}, \mathcal{R}_{direct}, \mathcal{D}_{mix})$
 
 No rewarder is trained or queried. The mutator update runs on every cycle.
