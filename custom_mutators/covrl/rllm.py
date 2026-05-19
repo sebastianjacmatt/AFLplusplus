@@ -8,6 +8,10 @@ def init(seed: int) -> None:
     _m.init(seed)
 
 
+def splice_optout() -> bool:
+    return True
+
+
 def fuzz_count(buf: bytearray) -> int:
     return _m.fuzz_count(buf)
 
