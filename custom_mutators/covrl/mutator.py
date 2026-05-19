@@ -34,7 +34,9 @@ class Mutator:
 
         self.masking = Masking(self.cfg)
         self.rollout = RolloutBuffer(self.cfg)
-        self.model = LLMModel(self.cfg)
+        # Share the tokenizer to keep sentinel / pad / eos ids consistent
+        # between Masking and LLMModel.
+        self.model = LLMModel(self.cfg, tokenizer=self.masking.tokenizer)
         self.trainer = self._build_trainer()
 
     def queue_get(self, filename: str) -> bool:
@@ -58,26 +60,52 @@ class Mutator:
             )
 
         num_groups = self.cfg.fuzz_count // self.cfg.group_size
+        group_size = self.cfg.group_size
 
-        self._pending.clear()
+        # Sample one mask per group; gather all xs + group ids.
+        mps = []
+        gids: list[int] = []
         for _ in range(num_groups):
             self._group_id += 1
-            mask = self.masking.sample_mask(tokens)
-            x = self.masking.encode_input(mask)
-            ys = self.model.batch_generate_grouped(
-                x,
-                n_samples=self.cfg.group_size,
-                max_length=self.cfg.max_output_length,
-            )
-            for y in ys:
-                self._pending.append((mask, x, y, self._group_id))
+            mp = self.masking.mask(tokens)
+            if not mp.spans:
+                raise RuntimeError(
+                    f"no spans sampled from seed (n_tokens={len(tokens)}); "
+                    "seed too short for masking"
+                )
+            mps.append(mp)
+            gids.append(self._group_id)
+
+        # One mega-batch generate() across all groups. PPO (group_size=1)
+        # batches across mutations; GRPO (group_size>1) batches across groups
+        # AND across the num_return_sequences samples inside each group.
+        # Use max(budgets) as max_new_tokens — span counts cluster tightly
+        # under fixed mask_ratio, so padding waste is small relative to the
+        # throughput win of a single batched call.
+        max_new_tokens = max(
+            self.masking.generation_budget(mp, self.cfg.max_new_tokens_per_span)
+            for mp in mps
+        )
+        xs = [mp.input_ids for mp in mps]
+        ys_flat = self.model.batch_generate(
+            xs, n_samples=group_size, max_new_tokens=max_new_tokens
+        )
+
+        # HF num_return_sequences layout: [mps[0]·gs, mps[1]·gs, ...].
+        # Replicate masks / gids to align.
+        mps_flat = [mp for mp in mps for _ in range(group_size)]
+        gids_flat = [gid for gid in gids for _ in range(group_size)]
+        outs = self.masking.batch_decode(mps_flat, ys_flat)
+
+        self._pending.clear()
+        for mp, y, out, gid in zip(mps_flat, ys_flat, outs, gids_flat):
+            self._pending.append((mp.input_ids, y, out, gid))
         return self.cfg.fuzz_count
 
     def fuzz(self, buf: bytearray, add_buf: bytearray, max_size: int) -> bytearray:
         if not self._pending:
             self.fuzz_count(buf)
-        mask, x, y, gid = self._pending.popleft()
-        out = self.masking.decode_output(mask, y)
+        x, y, out, gid = self._pending.popleft()
         if len(out) > max_size:
             raise RuntimeError(
                 "generated program exceeds AFL max_size "
