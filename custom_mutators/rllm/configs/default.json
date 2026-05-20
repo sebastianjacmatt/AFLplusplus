@@ -1,0 +1,23 @@
+{
+    "fuzz_count": 16,
+    "finetune_every": 100,
+
+    "model_name_or_path": "Salesforce/codet5p-220m",
+    "sampling_method": "contrastive",
+    "max_new_tokens": 64,
+    "device": "auto",
+
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 50,
+    "no_repeat_ngram_size": 3,
+
+    "penalty_alpha": 0.6,
+    "contrastive_top_k": 4,
+
+    "corruption_rate": 0.15,
+    "mean_span_length": 3.0,
+    "min_span_length": 1,
+    "max_span_length": 5,
+    "whole_word_masking": true
+}

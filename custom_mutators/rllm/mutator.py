@@ -101,8 +101,18 @@ class Mutator:
         self._finetune_pending = False
         self._queue_get_count = 0
         self._stats = _Stats()
+        # Set in fuzz(), consumed in post_run(): lets us distinguish runs that
+        # executed a fresh LLM mutation from runs AFL initiated on its own
+        # (calibration, trim, sync). Without this the validity stat is diluted
+        # by ~56 calibration replays per saved queue entry.
+        self._last_run_was_mutation = False
 
     def queue_get(self, filename):
+        # Belt-and-suspenders: clear the mutation flag at the start of every
+        # queue cycle so any calibration of this entry (which runs between
+        # queue_get and fuzz_count) never inherits a stale True from a prior
+        # fuzz() whose post_run was skipped (e.g., post_process returned 0).
+        self._last_run_was_mutation = False
         self._queue_get_count += 1
         if self._queue_get_count % self.cfg.finetune_every == 0:
             self._finetune_pending = True
@@ -155,6 +165,7 @@ class Mutator:
         return len(self._pending_outputs)
 
     def fuzz(self, buf, add_buf, max_size):
+        self._last_run_was_mutation = True
         return self._pending_outputs.pop(0)
 
     def post_process(self, buf) -> bytes:
@@ -168,19 +179,29 @@ class Mutator:
 
     def post_run(self):
         path = self._stats.stderr_path
-        if not path:
-            return
-        try:
-            with open(path, "rb") as fh:
-                data = fh.read(4096)
-            text = data.decode("utf-8", errors="replace")
-        except OSError:
-            return
-        finally:
+        # Always drain the stderr file so calibration/trim output from the
+        # previous run doesn't bleed into the next mutation's classification.
+        text = ""
+        if path:
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read(4096)
+                text = data.decode("utf-8", errors="replace")
+            except OSError:
+                pass
             try:
                 os.truncate(path, 0)
             except OSError:
                 pass
+
+        # Only attribute validity to runs that executed a fresh LLM mutation.
+        # AFL fires post_run for calibration/trim/sync replays too; those drown
+        # out mutation outcomes (~56 replays per saved queue entry) and skew
+        # the rate toward the queue's validity instead of the model's.
+        if not self._last_run_was_mutation:
+            return
+        self._last_run_was_mutation = False
+
         cls = _classify_stderr(text)
         self._stats.run_total += 1
         if cls == "valid":

@@ -1,14 +1,19 @@
 """Configuration for the rllm custom mutator.
 
-One flat ``MutatorConfig`` dataclass holding every knob the mutator, model,
-and masking modules need. Values are read once in ``rllm.init`` and treated
-as immutable thereafter — edit defaults here (or replace :func:`load_config`
-when wiring env/CLI loading later) before AFL launches the forkserver.
+Presets live in ``configs/*.json``. The ``RLLM_CONFIG`` env var selects
+which file to load (default: ``configs/default.json``); relative paths
+resolve against this module's directory so they work regardless of AFL's
+working directory. The loaded config is mirrored to
+``<out>/rllm_config.json`` per run so each fuzzing run records the exact
+settings it used.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -17,16 +22,11 @@ class MutatorConfig:
 
     # --- AFL mutator cadence ---
     fuzz_count: int = 16
-    """Number of mutations produced per AFL seed (one batched generate)."""
-
     finetune_every: int = 100
-    """Seeds-between-finetune cadence. Unused in mutation-only mode; the
-    Mutator still tracks it so the CovRL extension drops in without edits."""
 
     # --- Model ---
     model_name_or_path: str = "Salesforce/codet5p-220m"
     sampling_method: str = "contrastive"
-    """``"contrastive"`` (CovRL §4 default — higher validity) or ``"nucleus"``."""
     max_new_tokens: int = 64
     device: str = "auto"
 
@@ -37,7 +37,6 @@ class MutatorConfig:
     no_repeat_ngram_size: int = 3
 
     # Contrastive-search knobs (used when sampling_method == "contrastive")
-    # CovRL §4 reports penalty_alpha=0.6 and top_k=32 as their setup.
     penalty_alpha: float = 0.6
     contrastive_top_k: int = 32
 
@@ -50,6 +49,33 @@ class MutatorConfig:
 
 
 def load_config() -> MutatorConfig:
-    """Return the default config. Replace this function (or edit the dataclass
-    defaults) when wiring env-var / CLI loading; ``rllm.init`` calls it once."""
-    return MutatorConfig()
+    """Load config from the JSON path in ``RLLM_CONFIG`` (default ``configs/default.json``).
+
+    Also mirrors the resolved config to ``<out>/rllm_config.json`` for
+    audit. Called once from ``rllm.init`` after AFL has set
+    ``AFL_CUSTOM_INFO_OUT``.
+    """
+    here = Path(__file__).resolve().parent
+    rel = os.environ.get("RLLM_CONFIG", "configs/default.json")
+    path = Path(rel) if os.path.isabs(rel) else here / rel
+    with open(path) as f:
+        data = json.load(f)
+    cfg = MutatorConfig(**data)
+    _mirror_to_out_dir(cfg, path)
+    return cfg
+
+
+def _mirror_to_out_dir(cfg: MutatorConfig, source_path: Path) -> None:
+    """Write the loaded config to ``<out>/rllm_config.json``."""
+    out_dir = os.environ.get("AFL_CUSTOM_INFO_OUT")
+    if not out_dir:
+        return
+    try:
+        with open(Path(out_dir) / "rllm_config.json", "w") as f:
+            json.dump(
+                {"_source": str(source_path), **asdict(cfg)},
+                f,
+                indent=2,
+            )
+    except OSError:
+        pass

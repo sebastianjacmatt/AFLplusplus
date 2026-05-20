@@ -67,9 +67,10 @@ def _build_mutator(seed) -> Mutator:
             max_new_tokens     = cfg.max_new_tokens,
             device             = cfg.device,
             gen_kwargs = {
-                "do_sample":     False,
-                "penalty_alpha": cfg.penalty_alpha,
-                "top_k":         cfg.contrastive_top_k,
+                "do_sample":            False,
+                "penalty_alpha":        cfg.penalty_alpha,
+                "top_k":                cfg.contrastive_top_k,
+                "no_repeat_ngram_size": 3,
             },
         )
     elif cfg.sampling_method == "nucleus":
