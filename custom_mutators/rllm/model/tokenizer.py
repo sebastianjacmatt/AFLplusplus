@@ -47,12 +47,13 @@ class Tokenizer:
 
     def tokenize(self, buf) -> list[int]:
         """Decode bytes as UTF-8 (lossy on invalid) and encode to token IDs."""
-        text = bytes(buf).decode("utf-8", errors="replace")
+        text = bytes(buf).decode("utf-8", errors="ignore")
         return self._hf.encode(text, add_special_tokens=False)
 
     def detokenize(self, token_ids: Sequence[int]) -> bytes:
         """Decode token IDs (special tokens stripped) and encode as UTF-8."""
         text = self._hf.decode(list(token_ids), skip_special_tokens=True)
+        text = text.replace("�", "")
         return text.encode("utf-8")
 
     # ------------------------------------------------------------------

@@ -48,8 +48,7 @@ def splice_optout():
 
 
 def queue_new_entry(filename_new_queue, filename_orig_queue):
-    MUTATOR.queue_new_entry(filename_new_queue, filename_orig_queue)
-    return False
+    return MUTATOR.queue_new_entry(filename_new_queue, filename_orig_queue)
 
 
 def deinit():

@@ -60,7 +60,7 @@ def load_config() -> MutatorConfig:
     path = Path(rel) if os.path.isabs(rel) else here / rel
     with open(path) as f:
         data = json.load(f)
-    cfg = MutatorConfig(**data)
+    cfg = MutatorConfig(**{k: v for k, v in data.items() if not k.startswith("_")})
     _mirror_to_out_dir(cfg, path)
     return cfg
 

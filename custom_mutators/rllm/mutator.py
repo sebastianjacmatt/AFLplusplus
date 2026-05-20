@@ -106,6 +106,15 @@ class Mutator:
         # (calibration, trim, sync). Without this the validity stat is diluted
         # by ~56 calibration replays per saved queue entry.
         self._last_run_was_mutation = False
+        self._last_run_class: str = "valid"
+        # Filenames of queue entries whose original execution produced a
+        # syntax/semantic error. AFL doesn't expose a veto hook on queue
+        # insertion (add_to_queue always commits before queue_new_entry
+        # fires), so we let invalid entries sit in the queue and skip them
+        # at queue_get time. Mutating already-broken JS is near-deterministically
+        # wasted compute — the LLM's local span infill cannot repair global
+        # syntax breakage. See docs/queue_validity_collapse.md.
+        self._invalid_filenames: set = set()
 
     def queue_get(self, filename):
         # Belt-and-suspenders: clear the mutation flag at the start of every
@@ -116,7 +125,7 @@ class Mutator:
         self._queue_get_count += 1
         if self._queue_get_count % self.cfg.finetune_every == 0:
             self._finetune_pending = True
-        return True
+        return filename not in self._invalid_filenames
 
     def fuzz_count(self, buf):
         self._maybe_finetune()
@@ -203,6 +212,7 @@ class Mutator:
         self._last_run_was_mutation = False
 
         cls = _classify_stderr(text)
+        self._last_run_class = cls
         self._stats.run_total += 1
         if cls == "valid":
             self._stats.run_valid += 1
@@ -215,6 +225,13 @@ class Mutator:
     def queue_new_entry(self, new, orig):
         self._stats.queue_finds += 1
         self._stats.maybe_flush()
+        # Record invalid finds so queue_get can skip them later. The hook's
+        # return value is NOT a veto on queue insertion (the entry is already
+        # committed by add_to_queue before this fires); it only signals to
+        # AFL whether we modified the file on disk, which we did not.
+        if self._last_run_class != "valid":
+            self._invalid_filenames.add(new)
+        return False
 
     def deinit(self):
         self._stats.maybe_flush(force=True)
