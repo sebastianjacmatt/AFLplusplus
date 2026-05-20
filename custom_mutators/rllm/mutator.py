@@ -116,6 +116,11 @@ class Mutator:
         tokens = self.model.tokenizer.tokenize(buf)
         self._stats.tokenize_s += time.monotonic() - t0
 
+        # TODO(alignment): clamp source length to CodeT5's pretraining ceiling
+        # of 512 tokens (CodeT5 §4.5: "maximum source and target sequence
+        # lengths to be 512 and 256"). Over-length seeds either skip (return 0)
+        # or truncate `tokens` here. Add `max_source_length: int = 512` to
+        # MutatorConfig when wiring this in.
         if not tokens:
             self._stats.empty_tokenize += 1
             self._pending_outputs = []
@@ -126,6 +131,12 @@ class Mutator:
         masks = [self.masking.mask(tokens) for _ in range(self.cfg.fuzz_count)]
         self._stats.mask_s += time.monotonic() - t0
 
+        # TODO(alignment): dynamic per-call max_new_tokens via
+        # `max(self.masking.generation_budget(mp, max_per_span=20) for mp in masks)`,
+        # passed to batch_generate's `max_new_tokens` override. Keeps per-span
+        # budget constant regardless of how many spans the masker sampled and
+        # avoids truncating trailing spans on multi-span seeds. Mirrors
+        # rlm_mutator's `masked_span_prediction_batch` budget calc.
         t0 = time.monotonic()
         outputs = self.model.batch_generate(
             [mp.input_ids for mp in masks], n_samples=1,

@@ -58,14 +58,38 @@ def deinit():
 
 def _build_mutator(seed) -> Mutator:
     cfg = load_config()
-    model = Model(
-        model_name_or_path = cfg.model_name_or_path,
-        max_new_tokens     = cfg.max_new_tokens,
-        temperature        = cfg.temperature,
-        top_p              = cfg.top_p,
-        top_k              = cfg.top_k,
-        device             = cfg.device,
-    )
+
+    if cfg.sampling_method == "contrastive":
+        # CovRL §4: penalty_alpha=0.6, top_k=32. do_sample=False is HF's
+        # contrastive-search trigger when penalty_alpha is set.
+        model = Model(
+            model_name_or_path = cfg.model_name_or_path,
+            max_new_tokens     = cfg.max_new_tokens,
+            device             = cfg.device,
+            gen_kwargs = {
+                "do_sample":     False,
+                "penalty_alpha": cfg.penalty_alpha,
+                "top_k":         cfg.contrastive_top_k,
+            },
+        )
+    elif cfg.sampling_method == "nucleus":
+        model = Model(
+            model_name_or_path = cfg.model_name_or_path,
+            max_new_tokens     = cfg.max_new_tokens,
+            device             = cfg.device,
+            gen_kwargs = {
+                "do_sample":            True,
+                "temperature":          cfg.temperature,
+                "top_p":                cfg.top_p,
+                "top_k":                cfg.top_k,
+                "no_repeat_ngram_size": cfg.no_repeat_ngram_size,
+            },
+        )
+    else:
+        raise ValueError(
+            f"cfg.sampling_method must be 'contrastive' or 'nucleus', "
+            f"got {cfg.sampling_method!r}."
+        )
     masking = Masking(
         sentinel_ids     = model.tokenizer.sentinel_ids,
         word_starts_fn   = model.tokenizer.word_starts if cfg.whole_word_masking else None,

@@ -11,15 +11,13 @@ Owns the LLM end of the mutator pipeline:
       ``model.generate`` call, eating HF's per-call overhead once per seed.
     - Checkpoint save for the eventual CovRL trainer to call from ``deinit``.
 
-The class is intentionally stateless w.r.t. masking — it does not know about
-sentinels, spans, or word boundaries; those concerns live in ``tokenizer.py``
-and ``masking.py``. Adding a ``batch_generate_with_logprobs`` for PPO old-log-
-prob capture is the only extension expected for the CovRL milestone.
+The class is stateless w.r.t. decoding strategy: caller (``rllm._build_mutator``)
+picks contrastive vs nucleus and hands the corresponding ``gen_kwargs`` dict in.
 """
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
 
 import torch
 from transformers import AutoModelForSeq2SeqLM
@@ -32,21 +30,20 @@ class Model:
 
     Construction:
       - ``model_name_or_path``: HF id or local path (e.g. ``"Salesforce/codet5p-220m"``).
-      - Generation knobs: ``max_new_tokens``, ``temperature``, ``top_p``,
-        ``top_k``, ``no_repeat_ngram_size``. Applied to every ``batch_generate``
-        call unless overridden per-call.
-      - ``device``: ``"auto"`` (cuda when available, else cpu) or an explicit
-        torch device string.
+      - ``gen_kwargs``: HF-generate args specific to the chosen decoding
+        strategy. Picked by ``rllm._build_mutator`` based on
+        ``cfg.sampling_method`` — see that branch for the contrastive vs
+        nucleus dicts. Splatted into every ``model.generate`` call alongside
+        the always-needed args (input/attention/max_new_tokens/eos/pad/N).
+      - ``max_new_tokens``: decoder budget (overridable per ``batch_generate`` call).
+      - ``device``: ``"auto"`` (cuda when available, else cpu) or explicit.
     """
 
     def __init__(
         self,
         model_name_or_path: str,
+        gen_kwargs: dict[str, Any],
         max_new_tokens: int = 64,
-        temperature: float = 1.0,
-        top_p: float = 0.95,
-        top_k: int = 50,
-        no_repeat_ngram_size: int = 3,
         device: str = "auto",
     ):
         self.tokenizer = Tokenizer(model_name_or_path)
@@ -58,11 +55,8 @@ class Model:
         self.device = device
         self._hf.to(device)
 
+        self.gen_kwargs = dict(gen_kwargs)
         self.max_new_tokens = max_new_tokens
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
-        self.no_repeat_ngram_size = no_repeat_ngram_size
 
     # ------------------------------------------------------------------
     # Inference
@@ -110,15 +104,11 @@ class Model:
         outputs = self._hf.generate(
             input_ids            = input_ids_t,
             attention_mask       = attn_mask_t,
-            do_sample            = True,
-            temperature          = self.temperature,
-            top_p                = self.top_p,
-            top_k                = self.top_k,
             max_new_tokens       = max_new_tokens or self.max_new_tokens,
             eos_token_id         = eos_id,
             pad_token_id         = pad_id,
-            no_repeat_ngram_size = self.no_repeat_ngram_size,
             num_return_sequences = n_samples,
+            **self.gen_kwargs,
         )
         return [seq.tolist() for seq in outputs]
 

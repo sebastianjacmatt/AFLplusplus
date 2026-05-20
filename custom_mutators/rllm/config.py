@@ -25,11 +25,21 @@ class MutatorConfig:
 
     # --- Model ---
     model_name_or_path: str = "Salesforce/codet5p-220m"
+    sampling_method: str = "contrastive"
+    """``"contrastive"`` (CovRL §4 default — higher validity) or ``"nucleus"``."""
     max_new_tokens: int = 64
+    device: str = "auto"
+
+    # Nucleus-sampling knobs (used when sampling_method == "nucleus")
     temperature: float = 1.0
     top_p: float = 0.95
     top_k: int = 50
-    device: str = "auto"
+    no_repeat_ngram_size: int = 3
+
+    # Contrastive-search knobs (used when sampling_method == "contrastive")
+    # CovRL §4 reports penalty_alpha=0.6 and top_k=32 as their setup.
+    penalty_alpha: float = 0.6
+    contrastive_top_k: int = 32
 
     # --- Masking (T5 / CodeT5 defaults) ---
     corruption_rate: float = 0.15
