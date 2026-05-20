@@ -31,12 +31,25 @@ def fuzz(buf, add_buf, max_size):
     return MUTATOR.fuzz(buf, add_buf, max_size)
 
 
+def post_process(buf):
+    return MUTATOR.post_process(buf)
+
+
+def describe(max_description_len):
+    return b"rllm"
+
+
 def post_run():
     MUTATOR.post_run()
 
 
+def splice_optout():
+    pass
+
+
 def queue_new_entry(filename_new_queue, filename_orig_queue):
     MUTATOR.queue_new_entry(filename_new_queue, filename_orig_queue)
+    return False
 
 
 def deinit():

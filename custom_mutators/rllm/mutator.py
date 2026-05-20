@@ -1,4 +1,96 @@
 # mutator.py
+import os
+import sys
+import time
+
+_SYNTAX_MARKERS   = ("SyntaxError",)
+_SEMANTIC_MARKERS = ("ReferenceError", "TypeError", "RangeError", "URIError", "EvalError")
+
+
+def _classify_stderr(text: str) -> str:
+    """Map JerryScript stderr text to 'syntax' / 'semantic' / 'valid'."""
+    if any(m in text for m in _SYNTAX_MARKERS):
+        return "syntax"
+    if any(m in text for m in _SEMANTIC_MARKERS):
+        return "semantic"
+    if not text.strip():
+        return "valid"
+    return "semantic"  # unknown non-empty stderr — conservative
+
+
+class _Stats:
+    """In-process mutator counters with rate-limited surfacing.
+
+    Writes a one-line snapshot to ``<out>/rllm_stats.txt`` every flush and,
+    when AFL's UI is off (``AFL_NO_UI=1``), also prints to stderr so the line
+    shows up in ``debug.log`` under ``run_rllm.sh -d``. In UI mode stderr is
+    suppressed — AFL repaints would garble it — so the file is the source of
+    truth (``tail -f <out>/rllm_stats.txt`` from another terminal).
+    """
+
+    def __init__(self, flush_every_s: float = 2.0):
+        self.flush_every_s = flush_every_s
+        self.start = time.monotonic()
+        self.last_flush = 0.0
+        # generation counters
+        self.seeds = 0
+        self.mutations = 0
+        self.empty_tokenize = 0
+        # timing
+        self.tokenize_s = 0.0
+        self.mask_s = 0.0
+        self.generate_s = 0.0
+        self.reconstruct_s = 0.0
+        # AFL corpus finds
+        self.queue_finds = 0
+        # validity counters (from post_run via exit_hook.so stderr redirect)
+        self.run_total = 0
+        self.run_valid = 0
+        self.run_syntax = 0
+        self.run_semantic = 0
+        # state
+        self.out_dir: str | None = os.environ.get("AFL_CUSTOM_INFO_OUT")
+        self.stderr_path: str | None = os.environ.get("RLM_STDERR_FILE")
+        self.ui_off = os.environ.get("AFL_NO_UI") == "1"
+
+    def maybe_flush(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self.last_flush < self.flush_every_s:
+            return
+        self.last_flush = now
+        elapsed = max(now - self.start, 1e-6)
+        seeds = max(self.seeds, 1)
+        muts = max(self.mutations, 1)
+        rt = max(self.run_total, 1)
+        find_rate   = self.queue_finds / muts * 100
+        valid_rate  = self.run_valid   / rt   * 100
+        syntax_rate = self.run_syntax  / rt   * 100
+        sem_rate    = self.run_semantic / rt   * 100
+        line = (
+            f"[rllm] t={elapsed:7.1f}s "
+            f"seeds={self.seeds:5d} "
+            f"muts={self.mutations:6d} "
+            f"finds={self.queue_finds:5d}({find_rate:5.1f}%) "
+            f"valid={valid_rate:5.1f}% "
+            f"syntax={syntax_rate:5.1f}% "
+            f"semantic={sem_rate:5.1f}% "
+            f"runs={self.run_total:6d} "
+            f"gen_ms={self.generate_s*1000/seeds:7.1f} "
+            f"muts/s={self.mutations/elapsed:6.1f}"
+        )
+        if self.out_dir:
+            try:
+                # Truncate-and-write keeps the same inode so `tail -f` (which
+                # follows the fd, not the path) keeps tracking across flushes.
+                path = os.path.join(self.out_dir, "rllm_stats.txt")
+                with open(path, "w") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass
+        if self.ui_off:
+            print(line, file=sys.stderr, flush=True)
+
+
 class Mutator:
     def __init__(self, cfg, masking, model, trainer=None):
         self.cfg = cfg
@@ -8,6 +100,7 @@ class Mutator:
         self._pending_outputs: list[bytearray] = []
         self._finetune_pending = False
         self._queue_get_count = 0
+        self._stats = _Stats()
 
     def queue_get(self, filename):
         self._queue_get_count += 1
@@ -17,26 +110,83 @@ class Mutator:
 
     def fuzz_count(self, buf):
         self._maybe_finetune()
+        self._stats.seeds += 1
+
+        t0 = time.monotonic()
         tokens = self.model.tokenizer.tokenize(buf)
+        self._stats.tokenize_s += time.monotonic() - t0
+
         if not tokens:
+            self._stats.empty_tokenize += 1
             self._pending_outputs = []
+            self._stats.maybe_flush()
             return 0
+
+        t0 = time.monotonic()
         masks = [self.masking.mask(tokens) for _ in range(self.cfg.fuzz_count)]
+        self._stats.mask_s += time.monotonic() - t0
+
+        t0 = time.monotonic()
         outputs = self.model.batch_generate(
             [mp.input_ids for mp in masks], n_samples=1,
         )
+        self._stats.generate_s += time.monotonic() - t0
+
+        t0 = time.monotonic()
         self._pending_outputs = [
             bytearray(self.model.tokenizer.reconstruct(mp, y))
             for mp, y in zip(masks, outputs)
         ]
+        self._stats.reconstruct_s += time.monotonic() - t0
+
+        self._stats.mutations += len(self._pending_outputs)
+        self._stats.maybe_flush()
         return len(self._pending_outputs)
 
     def fuzz(self, buf, add_buf, max_size):
         return self._pending_outputs.pop(0)
 
-    def post_run(self): pass
-    def queue_new_entry(self, new, orig): pass
-    def deinit(self): self.model.save_checkpoint()
+    def post_process(self, buf) -> bytes:
+        """Sanitize inputs to valid UTF-8 before the target sees them."""
+        raw = bytes(buf)
+        try:
+            raw.decode("utf-8", errors="strict")
+            return raw
+        except UnicodeDecodeError:
+            return raw.decode("utf-8", errors="replace").encode("utf-8")
+
+    def post_run(self):
+        path = self._stats.stderr_path
+        if not path:
+            return
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read(4096)
+            text = data.decode("utf-8", errors="replace")
+        except OSError:
+            return
+        finally:
+            try:
+                os.truncate(path, 0)
+            except OSError:
+                pass
+        cls = _classify_stderr(text)
+        self._stats.run_total += 1
+        if cls == "valid":
+            self._stats.run_valid += 1
+        elif cls == "syntax":
+            self._stats.run_syntax += 1
+        else:
+            self._stats.run_semantic += 1
+        self._stats.maybe_flush()
+
+    def queue_new_entry(self, new, orig):
+        self._stats.queue_finds += 1
+        self._stats.maybe_flush()
+
+    def deinit(self):
+        self._stats.maybe_flush(force=True)
+        self.model.save_checkpoint()
 
     def _maybe_finetune(self):
         if not self._finetune_pending:

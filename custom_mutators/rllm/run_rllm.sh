@@ -65,6 +65,9 @@ export PYTHONPATH="$RLLM_DIR"
 export AFL_PYTHON_MODULE=rllm
 export AFL_CUSTOM_MUTATOR_ONLY=1
 export AFL_DISABLE_TRIM=1
+export AFL_NO_FASTRESUME=1
+export AFL_PRELOAD="$RLLM_DIR/exit_hook.so"
+export RLM_STDERR_FILE="$OUT_DIR/rllm_stderr.txt"
 
 # -d: surface AFL_DEBUG output, propagate target stderr, dump Python tracebacks
 # on signals, and tee everything to <out>/debug.log so the run is auditable.
