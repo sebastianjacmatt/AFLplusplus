@@ -19,5 +19,5 @@
     "mean_span_length": 1.0,
     "min_span_length": 1,
     "max_span_length": 1,
-    "whole_word_masking": true
+    "whole_word_masking": false
 }

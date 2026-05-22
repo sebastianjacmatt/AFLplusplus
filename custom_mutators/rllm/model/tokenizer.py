@@ -15,6 +15,7 @@ IDs) as plain values rather than holding an HF tokenizer reference.
 
 from __future__ import annotations
 
+import struct
 from typing import Sequence
 
 from transformers import AutoTokenizer
@@ -57,6 +58,26 @@ class Tokenizer:
         return text.encode("utf-8")
 
     # ------------------------------------------------------------------
+    # u16 binary format — queue file representation under TLAFL/CovRL Option B
+    # ------------------------------------------------------------------
+
+    def parse_u16(self, buf) -> list[int]:
+        """Decode a little-endian uint16 buffer into a list of token IDs.
+
+        Queue files under Option B are sequences of u16 token IDs. A trailing
+        odd byte (shouldn't happen on our own outputs) is dropped.
+        """
+        b = bytes(buf)
+        if len(b) % 2:
+            b = b[:-1]
+        return [t for (t,) in struct.iter_unpack("<H", b)]
+
+    def encode_u16(self, token_ids: Sequence[int]) -> bytes:
+        """Pack token IDs as a little-endian uint16 byte sequence."""
+        ids = list(token_ids)
+        return struct.pack(f"<{len(ids)}H", *ids)
+
+    # ------------------------------------------------------------------
     # sentinel-aware reconstruct
     # ------------------------------------------------------------------
 
@@ -69,8 +90,24 @@ class Tokenizer:
         by HF encoder-decoder generate; missing sentinels are treated as empty
         replacements and any trailing terminal sentinel is dropped.
         """
+        return self.detokenize(self.reconstruct_tokens(masked_program, generated_ids))
+
+    def reconstruct_tokens(
+        self,
+        masked_program,
+        generated_ids: Sequence[int],
+    ) -> list[int]:
+        """Like ``reconstruct`` but returns the spliced token-id list.
+
+        Used by the u16-queue hot path: callers re-pack the result via
+        ``encode_u16`` instead of detokenizing to bytes. Avoids the
+        bytes-roundtrip on the inner loop.
+        """
         if not masked_program.spans:
-            return self.detokenize(masked_program.input_ids)
+            return [
+                tid for tid in masked_program.input_ids
+                if not self.is_sentinel_id(tid)
+            ]
 
         valid = {span.sentinel_id for span in masked_program.spans}
         spans_by_id = self._parse_generated_spans(generated_ids, valid)
@@ -81,7 +118,7 @@ class Tokenizer:
                 spliced.extend(spans_by_id[token_id])
             elif not self.is_sentinel_id(token_id):
                 spliced.append(token_id)
-        return self.detokenize(spliced)
+        return spliced
 
     # ------------------------------------------------------------------
     # Data consumed by masking (no HF tokenizer leaks across the boundary)

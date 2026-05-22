@@ -15,9 +15,9 @@
     "penalty_alpha": 0.6,
     "contrastive_top_k": 4,
 
-    "corruption_rate": 0.15,
-    "mean_span_length": 3.0,
+    "corruption_rate": 0.03,
+    "mean_span_length": 1.0,
     "min_span_length": 1,
-    "max_span_length": 5,
-    "whole_word_masking": true
+    "max_span_length": 1,
+    "whole_word_masking": false
 }

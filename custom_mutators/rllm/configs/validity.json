@@ -1,5 +1,5 @@
 {
-    "_comment": "Validity-first experiment. queue_new_entry rejects every non-valid corpus find, so the LLM only ever sees syntactically valid JS parents. Hypothesis: with small masks (span=1, rate=0.03) the model converges toward high steady-state validity as the corpus grows. Expected tradeoff: coverage growth slows because invalid inputs (which exercise parse-stage paths) are excluded. Run with -c configs/validity.json.",
+    "_comment": "Historical preset. The queue_new_entry-based validity filter it documented was removed when we switched to the u16 queue (Option B) — under that architecture, queue drift can't happen, so the filter is no longer needed. The masking parameters here happen to match the post-switch defaults (single-token Overwrite), so it remains a usable preset; the comment is retained as design history.",
 
     "fuzz_count": 16,
     "finetune_every": 100,
@@ -21,5 +21,5 @@
     "mean_span_length": 1.0,
     "min_span_length": 1,
     "max_span_length": 1,
-    "whole_word_masking": true
+    "whole_word_masking": false
 }
