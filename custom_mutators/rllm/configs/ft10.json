@@ -1,6 +1,8 @@
 {
+    "_comment": "Test config: finetune_every=10, absolute paths for this machine",
+
     "fuzz_count": 512,
-    "finetune_every": 100,
+    "finetune_every": 10,
 
     "model_name_or_path": "Salesforce/codet5p-220m",
     "sampling_method": "contrastive",
@@ -26,7 +28,7 @@
     "critic_epochs": 1,
     "actor_epochs": 1,
 
-    "target_bin": "jerry",
-    "afl_showmap": "afl-showmap",
+    "target_bin": "/home/sebastian/Documents/data_store/engines/jerryscript/build/bin/jerry",
+    "afl_showmap": "/home/sebastian/Documents/AFLplusplus/afl-showmap",
     "idf_alpha": 0.6
 }

@@ -47,6 +47,17 @@ class MutatorConfig:
     max_span_length: int = 5
     whole_word_masking: bool = True
 
+    # --- Training ---
+    train_batch_size: int = 4
+    learning_rate: float = 5e-5
+    critic_epochs: int = 1
+    actor_epochs: int = 1
+
+    # --- Rollout / reward ---
+    target_bin: str = "jerry"
+    afl_showmap: str = "afl-showmap"
+    idf_alpha: float = 0.6
+
 
 def load_config() -> MutatorConfig:
     """Load config from the JSON path in ``RLLM_CONFIG`` (default ``configs/default.json``).

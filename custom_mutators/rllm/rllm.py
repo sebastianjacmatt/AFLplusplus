@@ -3,12 +3,16 @@
 Thin shim — module-level AFL hooks delegate to a single Mutator instance.
 """
 
+import os
 import random
+from pathlib import Path
 
 from config import load_config
 from data.masking import Masking
+from data.rewarding import Rewarding
 from model.llm import Model
 from mutator import Mutator
+from training.covrl_trainer import CovRLTrainer
 
 MUTATOR: Mutator | None = None
 
@@ -98,4 +102,18 @@ def _build_mutator(seed) -> Mutator:
         min_span_length  = cfg.min_span_length,
         max_span_length  = cfg.max_span_length,
     )
-    return Mutator(cfg, masking, model, trainer=None)
+    trainer = None
+    if cfg.finetune_every > 0:
+        queue_dir = Path(os.environ.get("AFL_CUSTOM_INFO_OUT", ".")) / "queue"
+        tmp_dir = Path(os.environ.get("AFL_CUSTOM_INFO_OUT", "/tmp")) / "rollout_tmp"
+        idf_path = Path(os.environ.get("AFL_CUSTOM_INFO_OUT", "/tmp")) / "idf_embedding.bin"
+        rewarding = Rewarding(
+            afl_showmap=Path(cfg.afl_showmap),
+            target_bin=Path(cfg.target_bin),
+            tmp_dir=tmp_dir,
+            alpha=cfg.idf_alpha,
+            idf_path=idf_path,
+        )
+        trainer = CovRLTrainer(model, masking, rewarding, cfg, queue_dir)
+
+    return Mutator(cfg, masking, model, trainer=trainer)
