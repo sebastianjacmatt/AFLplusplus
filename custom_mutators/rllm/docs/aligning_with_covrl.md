@@ -458,6 +458,63 @@ behave well in practice. Without it our seed corpus carries non-ASCII
 strings from regression tests that produce the byte-boundary U+FFFD class
 of artifacts we've been seeing.
 
+#### 5.1.1 Two corpora (current implementation, 2026-05-22)
+
+`data/preprocess.py` produces the **training corpus** (full deduped
+tokenized set). `data/sample_seeds.py` then derives the **fuzz corpus**
+by validity-filtering + `afl-cmin`-reducing + reservoir-sampling 100
+files from the training corpus. The fuzz corpus is what AFL ingests as
+`-i`; the training corpus is what future PPO will draw from at the
+documented 4:1 train:mutation ratio.
+
+Validity filtering — running the target on each candidate and keeping
+files with clean stderr + exit 0 — also serves as the **harness
+filter**. Test262 cases needing `assert.js`, V8 cases needing
+`mjsunit.js`, Chakra cases needing `WScript`, etc., all throw
+`ReferenceError` and are excluded automatically.
+
+#### 5.1.2 Harness polyfill (future work)
+
+Most of `raw-dataset-dec22` (especially the ~47k test262 cases) won't
+survive validity filtering because they need engine-specific harness
+files we don't load. The fuzz corpus consequently skews toward
+self-contained cases (jerry's own regression suite, js-vuln-db CVE
+repros, a subset of test262 that doesn't use the harness — often
+"negative" syntax-error tests).
+
+A small harness polyfill prepended to each candidate during validity
+filtering would reclaim several thousand cases:
+
+```js
+// test262 minimum: about 80% of cases use only assert.* + $ERROR.
+function assert(x, msg) { if (!x) throw new Error(msg || 'assert failed'); }
+assert.sameValue = (a, b) => { if (a !== b) throw new Error(`${a} !== ${b}`); };
+assert.notSameValue = (a, b) => { if (a === b) throw new Error(`${a} === ${b}`); };
+assert.throws = (E, fn) => { try { fn(); } catch (e) { if (!(e instanceof E)) throw e; return; } throw new Error('did not throw'); };
+const $ERROR = msg => { throw new Error(msg); };
+const Test262Error = Error;
+function $262() { return {}; }
+// V8 mjsunit minimum:
+function assertEquals(a, b) { if (a !== b) throw new Error(`${a} !== ${b}`); }
+function assertTrue(x) { if (!x) throw new Error('assertTrue failed'); }
+// Chakra WScript stub:
+const WScript = { Echo: print };
+```
+
+Open questions deferred:
+
+- Where to inject — prepend at the JS layer before tokenization, or
+  inject as a `--js` prelude file (jerry supports `--exec-snippet`)?
+- Approximation faithfulness — `assert.sameValue` uses `===`, but
+  test262's spec uses `SameValue` semantics (handles NaN, ±0). For
+  rough validity filtering this is fine; for actual test262
+  conformance it isn't. We want the former.
+- Should the polyfill also land in the training corpus, so PPO sees
+  inputs that resemble what fuzzes?
+
+Not implemented yet. Belongs in a separate follow-up plan once the
+Table 7 baseline is reproduced.
+
 ### 5.2 model/
 
 - Keep `Salesforce/codet5p-220m`. Same model CovRL uses.

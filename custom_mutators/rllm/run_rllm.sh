@@ -32,7 +32,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 RLLM_DIR="$SCRIPT_DIR"
 AFLPP_DIR="$( cd "$SCRIPT_DIR/../.." && pwd )"
 
-DEFAULT_DATASET="final-dataset-dec22"
+DEFAULT_DATASET="dataset-dec22-u16-seeds"
 DEFAULT_CONFIG="configs/default.json"
 DATASET="$DEFAULT_DATASET"
 RUN_NAME=""
@@ -41,7 +41,7 @@ DEBUG=0
 AFL_FUZZ_BIN="$AFLPP_DIR/afl-fuzz"
 TARGET_BIN="$HOME/Documents/data_store/engines/jerryscript/build/bin/jerry"
 
-USAGE="Usage: $0 [-i dataset_dir] -o run_name [-c config_json] [-d]"
+USAGE="Usage: $0 [-i seed_dir] -o run_name [-c config_json] [-d]"
 
 while getopts "i:o:c:d" opt; do
   case "$opt" in
@@ -66,24 +66,16 @@ case "$CONFIG" in
 esac
 require_file "$CONFIG_PATH" "config file"
 
-RAW_DATASET_DIR="$HOME/Documents/data_store/dataset/$DATASET"
-DATASET_DIR="$HOME/Documents/data_store/dataset/${DATASET}-u16"
+# -i is the u16 SEED dir AFL ingests (validity-filtered + afl-cmin-reduced).
+# Prepare it externally — see README "Preprocessing":
+#   python -m data.preprocess   --input <raw_js> --output <name>-u16
+#   python -m data.sample_seeds --input <name>-u16 --output <name>-u16-seeds --target <jerry>
+DATASET_DIR="$HOME/Documents/data_store/dataset/$DATASET"
 OUT_DIR="$HOME/Documents/data_store/out/$RUN_NAME"
 
 require_executable "$AFL_FUZZ_BIN" "afl-fuzz"
-require_dir "$RAW_DATASET_DIR" "raw dataset directory"
 require_executable "$TARGET_BIN" "jerryscript binary"
-
-# Seeds for the TLAFL/CovRL Option B architecture are u16 token-id binaries,
-# not JS source. Build the u16 dataset on first run (idempotent thereafter
-# via the .rllm_tokenizer marker file). See docs/aligning_with_covrl.md and
-# docs/option_b_viability.md.
-DATASET_MARKER="${DATASET_DIR}.tokenizer.json"
-if [ ! -f "$DATASET_MARKER" ]; then
-  echo "[run_rllm] preprocessing seeds: $RAW_DATASET_DIR -> $DATASET_DIR"
-  (cd "$RLLM_DIR" && python -m data.preprocess --input "$RAW_DATASET_DIR" --output "$DATASET_DIR")
-fi
-require_dir "$DATASET_DIR" "preprocessed (u16) dataset directory"
+require_dir "$DATASET_DIR" "u16 seed directory (run data.preprocess + data.sample_seeds first)"
 
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONPATH="$RLLM_DIR"

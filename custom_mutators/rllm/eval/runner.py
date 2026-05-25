@@ -185,7 +185,7 @@ def main() -> None:
                         help="Per-run wall-clock seconds (default: 3600 = 1h)")
     parser.add_argument("--runs", type=int, default=1,
                         help="Number of independent runs to average (default: 1)")
-    parser.add_argument("--dataset", default="final-dataset-dec22",
+    parser.add_argument("--dataset", default="dataset-dec22-u16-seeds",
                         help="Seed dataset name (default: final-dataset-dec22)")
     parser.add_argument("--config", default="configs/default.json",
                         help="Mutator config (default: configs/default.json)")

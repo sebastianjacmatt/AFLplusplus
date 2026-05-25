@@ -63,54 +63,90 @@ class Model:
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def batch_generate(
+    def generate(
         self,
-        input_ids_list: Sequence[Sequence[int]],
+        input_ids: Sequence[int],
         n_samples: int = 1,
         max_new_tokens: int | None = None,
     ) -> list[list[int]]:
-        """One batched generate across many masked inputs.
+        """Generate ``n_samples`` outputs for one masked input.
 
-        ``input_ids_list[i]`` is the sentinelized encoder input for mask ``i``;
-        all entries are right-padded to the longest length with the tokenizer's
-        pad token, and an attention mask is built so padded positions don't
-        influence generation.
+        ``input_ids`` is the sentinelized encoder input for a single mask.
+        Returns ``n_samples`` token sequences (each a ``list[int]`` including
+        HF's leading decoder-start) per HF's ``num_return_sequences`` ordering.
 
-        Returns ``len(input_ids_list) * n_samples`` token sequences (each a
-        ``list[int]`` including HF's leading decoder-start). With
-        ``n_samples > 1`` (GRPO later), samples for input ``i`` occupy
-        ``results[i*n_samples : (i+1)*n_samples]`` per HF's
-        ``num_return_sequences`` ordering.
+        Sequential single-input call matches CovRL's predict-per-havoc-iter
+        protocol exactly and dodges the in-step ``repeat_interleave(top_k)``
+        memory blowup of batched contrastive search.
         """
-        if not input_ids_list:
-            return []
         if n_samples < 1:
             raise ValueError(f"n_samples must be >= 1, got {n_samples}.")
 
-        pad_id = self.tokenizer.pad_token_id
-        eos_id = self.tokenizer.eos_token_id
-
-        max_len = max(len(ids) for ids in input_ids_list)
-        padded: list[list[int]] = []
-        attn: list[list[int]] = []
-        for ids in input_ids_list:
-            pad_n = max_len - len(ids)
-            padded.append(list(ids) + [pad_id] * pad_n)
-            attn.append([1] * len(ids) + [0] * pad_n)
-
-        input_ids_t = torch.tensor(padded, dtype=torch.long, device=self.device)
-        attn_mask_t = torch.tensor(attn, dtype=torch.long, device=self.device)
+        input_ids_t = torch.tensor(
+            [list(input_ids)], dtype=torch.long, device=self.device,
+        )
 
         outputs = self._hf.generate(
             input_ids            = input_ids_t,
-            attention_mask       = attn_mask_t,
             max_new_tokens       = max_new_tokens or self.max_new_tokens,
-            eos_token_id         = eos_id,
-            pad_token_id         = pad_id,
+            eos_token_id         = self.tokenizer.eos_token_id,
+            pad_token_id         = self.tokenizer.pad_token_id,
             num_return_sequences = n_samples,
             **self.gen_kwargs,
         )
         return [seq.tolist() for seq in outputs]
+
+    # Batched path — revive when we move off contrastive search to nucleus /
+    # GRPO. With contrastive, HF's `repeat_interleave(top_k, dim=0)` per decode
+    # step makes the in-step batch `chunk_size * top_k`; at fuzz_count=512,
+    # top_k=32 that's a 16,384-row intermediate that OOMs even on a 24 GB
+    # 3090. Nucleus has no such expansion so batching across inputs becomes
+    # a clean throughput win. To revive, restore `chunk_size: int = 16` on
+    # `__init__` and `self._pending_outputs` in `mutator.Mutator.__init__`.
+    #
+    # @torch.no_grad()
+    # def batch_generate(
+    #     self,
+    #     input_ids_list: Sequence[Sequence[int]],
+    #     n_samples: int = 1,
+    #     max_new_tokens: int | None = None,
+    # ) -> list[list[int]]:
+    #     if not input_ids_list:
+    #         return []
+    #     if n_samples < 1:
+    #         raise ValueError(f"n_samples must be >= 1, got {n_samples}.")
+    #
+    #     pad_id = self.tokenizer.pad_token_id
+    #     eos_id = self.tokenizer.eos_token_id
+    #     chunk = self.chunk_size if self.chunk_size > 0 else len(input_ids_list)
+    #
+    #     results: list[list[int]] = []
+    #     for start in range(0, len(input_ids_list), chunk):
+    #         batch = input_ids_list[start : start + chunk]
+    #         max_len = max(len(ids) for ids in batch)
+    #
+    #         padded: list[list[int]] = []
+    #         attn: list[list[int]] = []
+    #         for ids in batch:
+    #             pad_n = max_len - len(ids)
+    #             padded.append(list(ids) + [pad_id] * pad_n)
+    #             attn.append([1] * len(ids) + [0] * pad_n)
+    #
+    #         input_ids_t = torch.tensor(padded, dtype=torch.long, device=self.device)
+    #         attn_mask_t = torch.tensor(attn, dtype=torch.long, device=self.device)
+    #
+    #         outputs = self._hf.generate(
+    #             input_ids            = input_ids_t,
+    #             attention_mask       = attn_mask_t,
+    #             max_new_tokens       = max_new_tokens or self.max_new_tokens,
+    #             eos_token_id         = eos_id,
+    #             pad_token_id         = pad_id,
+    #             num_return_sequences = n_samples,
+    #             **self.gen_kwargs,
+    #         )
+    #         results.extend(seq.tolist() for seq in outputs)
+    #
+    #     return results
 
     # ------------------------------------------------------------------
     # Checkpointing

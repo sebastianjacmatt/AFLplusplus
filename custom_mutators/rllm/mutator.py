@@ -4,19 +4,7 @@ import os
 import sys
 import time
 
-_SYNTAX_MARKERS   = ("SyntaxError",)
-_SEMANTIC_MARKERS = ("ReferenceError", "TypeError", "RangeError", "URIError", "EvalError")
-
-
-def _classify_stderr(text: str) -> str:
-    """Map JerryScript stderr text to 'syntax' / 'semantic' / 'valid'."""
-    if any(m in text for m in _SYNTAX_MARKERS):
-        return "syntax"
-    if any(m in text for m in _SEMANTIC_MARKERS):
-        return "semantic"
-    if not text.strip():
-        return "valid"
-    return "semantic"  # unknown non-empty stderr — conservative
+from data.validity import classify_stderr
 
 
 class _Stats:
@@ -138,7 +126,6 @@ class Mutator:
         self.masking = masking
         self.model = model
         self.trainer = trainer  # may be None for pure-mutation
-        self._pending_outputs: list[bytes] = []
         self._finetune_pending = False
         self._queue_get_count = 0
         self._stats = _Stats()
@@ -183,43 +170,70 @@ class Mutator:
         return True
 
     def fuzz_count(self, buf):
+        # Sequential CovRL-faithful path: tokenize the parent once, cache it,
+        # announce the mutation budget. The actual masking + inference happens
+        # inside `fuzz()`, one mutation per call — matching CovRL's
+        # predict-per-havoc-iteration protocol (afl-fuzz.c:5183-5228).
         self._maybe_finetune()
         self._stats.seeds += 1
 
         t0 = time.monotonic()
         tokens = self.model.tokenizer.parse_u16(buf)
         self._stats.tokenize_s += time.monotonic() - t0
-        # Cache for the .cur_input.diff sidecar in post_process.
+        # Cache for both per-call masking in fuzz() and the .cur_input.diff
+        # sidecar in post_process.
         self._parent_tokens = tokens
 
         if not tokens:
             self._stats.empty_tokenize += 1
-            self._pending_outputs = []
             self._stats.maybe_flush()
             return 0
 
-        t0 = time.monotonic()
-        masks = [self.masking.mask(tokens) for _ in range(self.cfg.fuzz_count)]
-        self._stats.mask_s += time.monotonic() - t0
-
-        t0 = time.monotonic()
-        outputs = self.model.batch_generate(
-            [mp.input_ids for mp in masks], n_samples=1,
-        )
-        self._stats.generate_s += time.monotonic() - t0
-
-        t0 = time.monotonic()
-        self._pending_outputs = [
-            self.model.tokenizer.encode_u16(
-                self.model.tokenizer.reconstruct_tokens(mp, y)
-            )
-            for mp, y in zip(masks, outputs)
-        ]
-        self._stats.reconstruct_s += time.monotonic() - t0
-
-        self._stats.mutations += len(self._pending_outputs)
         self._stats.maybe_flush()
-        return len(self._pending_outputs)
+        return self.cfg.fuzz_count
+
+    # Batched path — revive when we move off contrastive search to nucleus /
+    # GRPO (contrastive's repeat_interleave(top_k) blows VRAM at fuzz_count=512,
+    # top_k=32). Needs `self._pending_outputs: list[bytes] = []` back in
+    # __init__, and `model.batch_generate` back in model/llm.py.
+    #
+    # def fuzz_count(self, buf):
+    #     self._maybe_finetune()
+    #     self._stats.seeds += 1
+    #
+    #     t0 = time.monotonic()
+    #     tokens = self.model.tokenizer.parse_u16(buf)
+    #     self._stats.tokenize_s += time.monotonic() - t0
+    #     self._parent_tokens = tokens
+    #
+    #     if not tokens:
+    #         self._stats.empty_tokenize += 1
+    #         self._pending_outputs = []
+    #         self._stats.maybe_flush()
+    #         return 0
+    #
+    #     t0 = time.monotonic()
+    #     masks = [self.masking.mask(tokens) for _ in range(self.cfg.fuzz_count)]
+    #     self._stats.mask_s += time.monotonic() - t0
+    #
+    #     t0 = time.monotonic()
+    #     outputs = self.model.batch_generate(
+    #         [mp.input_ids for mp in masks], n_samples=1,
+    #     )
+    #     self._stats.generate_s += time.monotonic() - t0
+    #
+    #     t0 = time.monotonic()
+    #     self._pending_outputs = [
+    #         self.model.tokenizer.encode_u16(
+    #             self.model.tokenizer.reconstruct_tokens(mp, y)
+    #         )
+    #         for mp, y in zip(masks, outputs)
+    #     ]
+    #     self._stats.reconstruct_s += time.monotonic() - t0
+    #
+    #     self._stats.mutations += len(self._pending_outputs)
+    #     self._stats.maybe_flush()
+    #     return len(self._pending_outputs)
 
     def fuzz(self, buf, add_buf, max_size):
         # MUST return bytearray, not bytes. AFL++'s Python binding takes the
@@ -230,9 +244,35 @@ class Mutator:
         # uses bytearray; the FATAL message says "bytearray or bytes" but bytes
         # is effectively broken on the current AFL++ tree.
         self._last_run_was_mutation = True
-        if not self._pending_outputs:
+
+        if not self._parent_tokens:
             return bytearray()
-        return bytearray(self._pending_outputs.pop(0))
+
+        t0 = time.monotonic()
+        mp = self.masking.mask(self._parent_tokens)
+        self._stats.mask_s += time.monotonic() - t0
+
+        t0 = time.monotonic()
+        outputs = self.model.generate(mp.input_ids, n_samples=1)
+        self._stats.generate_s += time.monotonic() - t0
+
+        t0 = time.monotonic()
+        out_tokens = self.model.tokenizer.reconstruct_tokens(mp, outputs[0])
+        out_u16 = self.model.tokenizer.encode_u16(out_tokens)
+        self._stats.reconstruct_s += time.monotonic() - t0
+
+        self._stats.mutations += 1
+        return bytearray(out_u16)
+
+    # Batched path — see the commented `fuzz_count` block above. Old `fuzz`
+    # body just popped a pre-computed bytes buffer out of `_pending_outputs`;
+    # all the work happened in `fuzz_count`.
+    #
+    # def fuzz(self, buf, add_buf, max_size):
+    #     self._last_run_was_mutation = True
+    #     if not self._pending_outputs:
+    #         return bytearray()
+    #     return bytearray(self._pending_outputs.pop(0))
 
     def post_process(self, buf) -> bytes:
         """Decode the u16 token buffer to JS source bytes for the target.
@@ -310,7 +350,7 @@ class Mutator:
             return
         self._last_run_was_mutation = False
 
-        cls = _classify_stderr(text)
+        cls = classify_stderr(text)
         self._last_run_class = cls
         self._stats.run_total += 1
         if cls == "valid":

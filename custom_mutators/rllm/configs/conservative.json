@@ -1,5 +1,5 @@
 {
-    "fuzz_count": 16,
+    "fuzz_count": 128,
     "finetune_every": 100,
 
     "model_name_or_path": "Salesforce/codet5p-220m",
@@ -13,7 +13,7 @@
     "no_repeat_ngram_size": 3,
 
     "penalty_alpha": 0.6,
-    "contrastive_top_k": 4,
+    "contrastive_top_k": 16,
 
     "corruption_rate": 0.03,
     "mean_span_length": 1.0,

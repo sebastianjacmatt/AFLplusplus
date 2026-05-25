@@ -30,22 +30,34 @@ cadence) — see future plans.
 
 ```
                                 ┌─────────────────────────────────────┐
-                                │  seed JS files (.js)                │
-                                │  ~/Documents/data_store/dataset/    │
-                                │     final-dataset-dec22/            │
+                                │  raw JS files (.js, ~64k)           │
+                                │  data_store/dataset/                │
+                                │     raw-dataset-dec22/              │
                                 └──────────────┬──────────────────────┘
                                                │
-                                               ▼   (one-shot)
+                                               ▼   (stage 1, one-shot)
                                 ┌─────────────────────────────────────┐
-                                │  data/preprocess.py                 │
-                                │  uglifyjs -m -b    ──►   tokenize   │
-                                │  tokenize     ──►   encode as u16   │
+                                │  data/preprocess.py    (parallel)   │
+                                │  uglifyjs -m -b  ──►  dedup         │
+                                │  tokenize        ──►  encode as u16 │
                                 └──────────────┬──────────────────────┘
                                                ▼
                                 ┌─────────────────────────────────────┐
-                                │  u16 binary seeds (-i dir)          │
-                                │  data_store/dataset/                │
-                                │     final-dataset-dec22-u16/        │
+                                │  u16 TRAINING corpus (~50k files)   │
+                                │  dataset-dec22-u16/                 │
+                                │  (for future PPO 4:1 train mix)     │
+                                └──────────────┬──────────────────────┘
+                                               │
+                                               ▼   (stage 2, one-shot)
+                                ┌─────────────────────────────────────┐
+                                │  data/sample_seeds.py               │
+                                │  decode → jerry validity filter     │
+                                │  → afl-cmin → reservoir-sample 100  │
+                                └──────────────┬──────────────────────┘
+                                               ▼
+                                ┌─────────────────────────────────────┐
+                                │  u16 FUZZ seeds (-i dir, 100 files) │
+                                │  dataset-dec22-u16-seeds/           │
                                 └──────────────┬──────────────────────┘
                                                │
               ┌────────────────────────────────┴───────────────────────────────┐
@@ -137,32 +149,67 @@ re-tokenization drift, no U+FFFD class of artifacts.
 
 ## 3. The `data/` layer
 
-Three files; only two have code today. The third (`rewarding.py`) is a
-placeholder for the future training subsystem.
+Five files with code: `preprocess.py`, `sample_seeds.py`, `validity.py`,
+`decode.py`, `masking.py`. The two empty stubs (`rewarding.py`,
+`rollout.py`) are placeholders for the future training subsystem.
 
-### `data/preprocess.py` — seed pipeline
+### `data/preprocess.py` — training corpus pipeline
 
-Run once per seed corpus. Converts JS files into u16 binary files that
-AFL ingests as the `-i` directory.
+Run once per raw JS corpus. Converts JS files into u16 binary files
+representing the **training corpus** (full deduped tokenized set, used
+later for PPO's 4:1 train mix). See README "Preprocessing" for full
+CLI; design rationale in
+[`aligning_with_covrl.md`](aligning_with_covrl.md) §5.1.
 
-Per-file pipeline:
+Per-file pipeline, run in parallel across workers:
 1. Read the raw JS source.
 2. Pipe through `uglifyjs --mangle --beautify` (`-m -b`). Mangling
    renames identifiers to short consistent names; beautify normalizes
    whitespace. Mirrors CovRL paper §4.
-3. Tokenize the uglified source with `Tokenizer.tokenize` (the standard
-   BPE encode).
-4. Truncate to `--max-tokens` (default 1024, matches CodeT5+'s
+3. Hash the uglified bytes and skip if seen (dedup is on by default —
+   catches templated test262 cases).
+4. Tokenize the uglified source with `Tokenizer.tokenize` (BPE encode).
+5. Truncate to `--max-tokens` (default 1024, matches CodeT5+'s
    pretraining source-sequence ceiling).
-5. Write the token-IDs as little-endian uint16 to
+6. Write the token-IDs as little-endian uint16 to
    `<output_dir>/<basename>`.
 
 A marker file is written **alongside** (not inside) the output dir as
-`<output_dir>.tokenizer.json`. It records `tokenizer`, `vocab_size`,
-`max_tokens`, and per-run stats. `run_rllm.sh` checks this marker to
-detect "already preprocessed" and skip the rebuild. The marker is
-deliberately *outside* the dir because AFL ingests every file under `-i`
-as a seed — leaving the marker inside fed garbage to `fuzz_count`.
+`<output_dir>.tokenizer.json`. The marker is deliberately *outside* the
+dir because AFL ingests every file under `-i` as a seed — leaving the
+marker inside fed garbage to `fuzz_count`.
+
+### `data/sample_seeds.py` — fuzz corpus selection
+
+Run once per (training corpus, target) pair. Selects 100
+validity-filtered, coverage-distinct seeds from the training corpus
+for AFL's `-i` directory.
+
+Pipeline:
+1. **Validity filter** (parallel): decode each u16 → JS, run jerry with
+   5 s timeout, classify stderr via `data/validity.py`. Keep only
+   `valid` with exit code 0. Doubles as a harness filter — files
+   needing `assert.js` / `mjsunit.js` / `WScript` are excluded
+   automatically since they fail with `ReferenceError`.
+2. **`afl-cmin`** on the validity-filtered set (per AFL++ docs
+   `fuzzing_in_depth.md` §2b "highly recommended"). Drops files that
+   don't add new coverage.
+3. **Reservoir-sample** N (default 100) uniformly with a deterministic
+   `--seed`.
+4. Copy chosen u16 files by name from `--input` to `--output`. No
+   `afl-tmin`: byte-level deletions would mangle JS grammar in ways
+   that wouldn't survive re-tokenization.
+
+`afl-cmin` is hard-coded to `../../afl-cmin` (the bundled AFL++ tree);
+the script errors out with a build hint if not present.
+
+### `data/validity.py` — stderr classifier
+
+Pure-stdlib module (no torch/HF) that maps a JerryScript stderr string
+to `valid` / `syntax` / `semantic`. Shared between `mutator.post_run`
+(runtime validity counter) and `sample_seeds.py` (offline seed
+filter). Class definitions mirror CovRL's `rewarding.py` reward
+partition.
 
 ### `data/decode.py` — inspection shim
 
