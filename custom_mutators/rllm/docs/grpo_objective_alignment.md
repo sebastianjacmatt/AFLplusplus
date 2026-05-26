@@ -137,3 +137,93 @@ alone cannot provide the aligned validity gradient that CovRL's 4:1 corpus mixin
 provides, regardless of the RL algorithm used.** Any design that omits corpus samples
 from the RL objective decouples validity anchoring from coverage optimisation and
 risks validity collapse as the AFL++ queue shifts toward mutations-of-mutations.
+
+---
+
+## 8. The Corpus Mixing is Experience Replay
+
+The CovRL-Fuzz paper (§7, Discussion) describes their anti-forgetting strategy as:
+
+> *"finetuning with a small learning rate and using some of the original seed data
+> for finetuning."*
+
+The 4:1 corpus mixing in the implementation is **experience replay** — a standard
+continual learning technique where samples from the original task distribution are
+replayed during fine-tuning to prevent catastrophic forgetting of the pre-training
+objective. In this framing, the validity collapse problem is a continual learning
+problem: GRPO fine-tuning on coverage-guided mutations is a new task that
+catastrophically interferes with the original masked span prediction (MSP) task on
+valid JS.
+
+This reframing opens the full toolkit of continual learning alternatives.
+
+---
+
+## 9. Continual Learning Alternatives to Experience Replay
+
+The following methods achieve the same anti-forgetting goal without mixing corpus
+samples into the RL objective, thereby avoiding the alignment problem in §4.
+
+### Method A — Elastic Weight Consolidation (EWC)
+
+Compute the Fisher information matrix $F$ of the model weights with respect to the
+pre-training MSP task once at startup (using a small sample of corpus programs). Add
+a quadratic penalty to the GRPO loss that resists changes to weights important for
+valid JS generation:
+
+$$L_\text{EWC}(\theta) = L_\text{GRPO}(\theta) + \frac{\lambda}{2} \sum_i F_i\,(\theta_i - \theta_i^*)^2$$
+
+where $\theta^*$ are the pretrained weights and $F_i$ is the Fisher information for
+parameter $i$. No corpus data enters the RL objective. The constraint is imposed at
+the parameter level, not the data level. Cost: one Fisher computation at init, a
+cheap quadratic penalty term per gradient step.
+
+### Method B — Averaged Gradient Episodic Memory (A-GEM)
+
+Store a small episodic memory $\mathcal{M}$ of valid JS programs (e.g., 512 samples
+from the broader corpus). At each GRPO gradient step, compute the gradient of the
+MSP loss on a random mini-batch from $\mathcal{M}$:
+
+$$g_\text{ref} = \nabla_\theta L_\text{MSP}(\theta;\, \mathcal{M}_\text{batch})$$
+
+If the GRPO gradient $g_\text{GRPO}$ would increase the MSP loss (i.e.,
+$g_\text{GRPO} \cdot g_\text{ref} < 0$), project it onto the constraint hyperplane:
+
+$$\tilde{g} = g_\text{GRPO} - \frac{g_\text{GRPO} \cdot g_\text{ref}}{\|g_\text{ref}\|^2}\, g_\text{ref}$$
+
+Otherwise apply $g_\text{GRPO}$ unchanged. This guarantees the GRPO update never
+increases loss on the valid JS memory. The episodic memory participates only in the
+**gradient projection**, not in the RL objective — the alignment problem in §4 does
+not apply.
+
+### Method C — Learning without Forgetting (LwF) via KL
+
+Use the frozen pretrained model $\pi_\text{ref}$ as a teacher. Add a knowledge
+distillation term over the **mutation inputs** (not a separate corpus):
+
+$$L_\text{LwF}(\theta) = L_\text{GRPO}(\theta) + \beta\, \mathrm{KL}\!\left(\pi_\text{ref}(\cdot \mid x) \;\|\; \pi_\theta(\cdot \mid x)\right)$$
+
+evaluated on the same $x$ inputs used by GRPO. Since $\pi_\text{ref}$ assigns higher
+probability to valid completions, the KL term penalises drift away from the
+pretrained validity distribution without requiring any corpus data in the objective.
+This is the true-KL approach discussed previously, recast here as a continual
+learning distillation method.
+
+---
+
+## 10. Comparison
+
+| Method | Corpus in RL obj. | Corpus data needed | Cost | Alignment problem |
+|---|---|---|---|---|
+| CovRL experience replay (4:1) | Yes | Yes, scored | afl-showmap at train time | Avoided (same batch) |
+| EWC | No | Yes, for Fisher at init | One-time Fisher computation | Does not arise |
+| A-GEM | No | Yes, episodic memory | Mini-batch gradient per step | Does not arise |
+| LwF / true KL | No | No | Frozen model forward pass | Does not arise |
+| Fixed zero baseline (§ Fix 1) | No | No | Zero | Does not arise (no corpus) |
+
+A-GEM is the closest methodological analogue to CovRL's experience replay: both use
+a memory of valid programs to constrain the fine-tuning update. The difference is
+where the constraint is applied — A-GEM enforces it at the **gradient level** (projection)
+whereas experience replay enforces it at the **data level** (batch mixing). A-GEM
+avoids the alignment problem entirely because the memory never participates in the
+RL objective.
