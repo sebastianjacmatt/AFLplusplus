@@ -13,6 +13,7 @@ runner skip the step on subsequent fuzzing sessions.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -75,7 +76,9 @@ def preprocess_dir(
     kept = 0
     skipped_uglify = 0
     skipped_empty = 0
+    skipped_dup = 0
     truncated = 0
+    seen_hashes: set[str] = set()
 
     for src_path in sorted(input_dir.iterdir()):
         if not src_path.is_file():
@@ -91,6 +94,12 @@ def preprocess_dir(
         if uglified is None or not uglified.strip():
             skipped_uglify += 1
             continue
+
+        h = hashlib.sha256(uglified).hexdigest()
+        if h in seen_hashes:
+            skipped_dup += 1
+            continue
+        seen_hashes.add(h)
 
         token_ids = tokenizer.tokenize(uglified)
         if not token_ids:
@@ -115,6 +124,7 @@ def preprocess_dir(
             "kept": kept,
             "skipped_uglify": skipped_uglify,
             "skipped_empty": skipped_empty,
+            "skipped_dup": skipped_dup,
             "truncated": truncated,
         },
     }
