@@ -4,19 +4,7 @@ import os
 import sys
 import time
 
-_SYNTAX_MARKERS   = ("SyntaxError",)
-_SEMANTIC_MARKERS = ("ReferenceError", "TypeError", "RangeError", "URIError", "EvalError")
-
-
-def _classify_stderr(text: str) -> str:
-    """Map JerryScript stderr text to 'syntax' / 'semantic' / 'valid'."""
-    if any(m in text for m in _SYNTAX_MARKERS):
-        return "syntax"
-    if any(m in text for m in _SEMANTIC_MARKERS):
-        return "semantic"
-    if not text.strip():
-        return "valid"
-    return "semantic"  # unknown non-empty stderr — conservative
+from data.validity import classify_stderr
 
 
 class _Stats:
@@ -310,7 +298,7 @@ class Mutator:
             return
         self._last_run_was_mutation = False
 
-        cls = _classify_stderr(text)
+        cls = classify_stderr(text)
         self._last_run_class = cls
         self._stats.run_total += 1
         if cls == "valid":
