@@ -32,8 +32,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 RLLM_DIR="$SCRIPT_DIR"
 AFLPP_DIR="$( cd "$SCRIPT_DIR/../.." && pwd )"
 
-DEFAULT_DATASET="final-dataset-dec22"
-DEFAULT_CONFIG="configs/default.json"
+DEFAULT_DATASET="dataset-dec22-u16-seeds"   # 100 valid seeds (already u16)
+DEFAULT_CONFIG="configs/grpo.json"
 DATASET="$DEFAULT_DATASET"
 RUN_NAME=""
 CONFIG="$DEFAULT_CONFIG"
@@ -66,22 +66,25 @@ case "$CONFIG" in
 esac
 require_file "$CONFIG_PATH" "config file"
 
-RAW_DATASET_DIR="$HOME/Documents/data_store/dataset/$DATASET"
-DATASET_DIR="$HOME/Documents/data_store/dataset/${DATASET}-u16"
 OUT_DIR="$HOME/Documents/data_store/out/$RUN_NAME"
+DSROOT="$HOME/Documents/data_store/dataset"
 
 require_executable "$AFL_FUZZ_BIN" "afl-fuzz"
-require_dir "$RAW_DATASET_DIR" "raw dataset directory"
 require_executable "$TARGET_BIN" "jerryscript binary"
 
-# Seeds for the TLAFL/CovRL Option B architecture are u16 token-id binaries,
-# not JS source. Build the u16 dataset on first run (idempotent thereafter
-# via the .rllm_tokenizer marker file). See docs/aligning_with_covrl.md and
-# docs/option_b_viability.md.
-DATASET_MARKER="${DATASET_DIR}.tokenizer.json"
-if [ ! -f "$DATASET_MARKER" ]; then
-  echo "[run_rllm] preprocessing seeds: $RAW_DATASET_DIR -> $DATASET_DIR"
-  (cd "$RLLM_DIR" && python -m data.preprocess --input "$RAW_DATASET_DIR" --output "$DATASET_DIR")
+# Seeds are u16 token-id binaries (TLAFL/CovRL Option B), not JS source. If
+# DATASET already names a preprocessed u16 dir (its .tokenizer.json marker
+# exists), use it directly; otherwise treat DATASET as raw JS and build the
+# ${DATASET}-u16 version on first run (idempotent via the marker).
+if [ -f "$DSROOT/${DATASET}.tokenizer.json" ]; then
+  DATASET_DIR="$DSROOT/$DATASET"
+else
+  require_dir "$DSROOT/$DATASET" "raw dataset directory"
+  DATASET_DIR="$DSROOT/${DATASET}-u16"
+  if [ ! -f "${DATASET_DIR}.tokenizer.json" ]; then
+    echo "[run_rllm] preprocessing seeds: $DSROOT/$DATASET -> $DATASET_DIR"
+    (cd "$RLLM_DIR" && python -m data.preprocess --input "$DSROOT/$DATASET" --output "$DATASET_DIR")
+  fi
 fi
 require_dir "$DATASET_DIR" "preprocessed (u16) dataset directory"
 
@@ -99,6 +102,11 @@ export AFL_POST_PROCESS_KEEP_ORIGINAL=1
 export AFL_FRAMESHIFT_DISABLE=1
 export AFL_PRELOAD="$RLLM_DIR/exit_hook.so"
 export RLM_STDERR_FILE="$OUT_DIR/rllm_stderr.txt"
+# Deliver a CATCHABLE signal (SIGUSR1=10) to the child on timeout so exit_hook.so
+# can tag hangs (→ "timeout" class, punished). Keep the forkserver on SIGKILL.
+# This changes only *which* signal kills on timeout — NOT the -t timeout duration.
+export AFL_KILL_SIGNAL=10
+export AFL_FORK_SERVER_KILL_SIGNAL=9
 export RLLM_CONFIG="$CONFIG"
 
 echo "[run_rllm] queue files are u16 token-id binary; use 'python -m data.decode <file>' to inspect"

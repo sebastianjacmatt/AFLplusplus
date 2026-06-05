@@ -1,10 +1,13 @@
-"""T5-style span-corruption masking for rllm.
+"""Masking for rllm — random span corruption (CovRL/TLAFL-style).
 
-Operates purely on token-id sequences. The module has no tokenizer
-dependency — sentinel IDs and the optional word-start function (for whole-
-word masking) are injected at construction time. CodeT5/T5-specific concerns
-(``<extra_id_N>`` resolution, BPE marker detection, bytes ↔ tokens, sentinel-
-aware reconstruct) live in ``model/tokenizer.py``.
+:class:`Masking` is pure-python random / T5 span corruption producing the
+``MaskedSpan`` / ``MaskedProgram`` data that ``model/tokenizer.py`` reconstructs
+against. No model; sentinel IDs and the optional word-start function are injected
+as plain data. ``mask_batch`` emits M random masks × G copies (block layout) so
+the GRPO trainer gets G infills per mask (one group).
+
+CodeT5/T5-specific concerns (``<extra_id_N>`` resolution, BPE marker detection,
+bytes ↔ tokens, sentinel-aware reconstruct) live in ``model/tokenizer.py``.
 """
 
 from __future__ import annotations
@@ -58,8 +61,7 @@ class Masking:
 
       * ``sentinel_ids`` — ordered list of sentinel token IDs (from
         ``Tokenizer.sentinel_ids``). Length must be ``max_spans + 1``; the
-        trailing ID is reserved as the T5 target-sequence terminator used by
-        :meth:`target_ids`.
+        trailing ID is reserved as the T5 target-sequence terminator.
       * ``word_starts_fn`` — optional callable ``list[int] -> list[int]``
         returning word-start positions (with a trailing ``len(tokens)``
         entry); when provided, spans are sampled at the word level.
@@ -75,6 +77,8 @@ class Masking:
         mean_span_length: float = 3.0,
         min_span_length: int = 1,
         max_span_length: int = 5,
+        max_masks: int = 0,
+        g: int = 8,
         rng: random.Random | None = None,
     ):
         if not 0.0 <= corruption_rate <= 1.0:
@@ -114,6 +118,8 @@ class Masking:
         self.mean_span_length = mean_span_length
         self.min_span_length = min_span_length
         self.max_span_length = max_span_length
+        self.max_masks = max_masks
+        self.g = max(1, int(g))               # infills per mask (GRPO group size)
         self.rng = rng or random
 
     # ------------------------------------------------------------------
@@ -125,13 +131,31 @@ class Masking:
         original = list(token_ids)
         n = len(original)
 
-        # Tiny-input guard: nothing to mask.
-        if n == 0 or n < self.min_span_length or self.corruption_rate == 0.0:
-            return MaskedProgram(
-                original_ids=original,
-                input_ids=list(original),
-                spans=[],
-            )
+        if n == 0:
+            return MaskedProgram(original_ids=original, input_ids=list(original), spans=[])
+
+        # CovRL-Fuzz overwrite mode: uniformly sample randint(1, max_masks)
+        # single-token positions and replace each with a sentinel — mirrors
+        # afl-fuzz.c RANDOM_OVERWRITE with UR(MASK_COUNT)+1.
+        if self.max_masks > 0:
+            count = self.rng.randint(1, self.max_masks)
+            count = min(count, n, self._max_spans)
+            positions = sorted(self.rng.sample(range(n), count))
+            input_ids: list[int] = []
+            spans: list[MaskedSpan] = []
+            prev = 0
+            for i, pos in enumerate(positions):
+                input_ids.extend(original[prev:pos])
+                sentinel_id = self._sentinel_ids[i]
+                input_ids.append(sentinel_id)
+                spans.append(MaskedSpan(start=pos, end=pos + 1, sentinel_id=sentinel_id))
+                prev = pos + 1
+            input_ids.extend(original[prev:])
+            return MaskedProgram(original_ids=original, input_ids=input_ids, spans=spans)
+
+        # T5 span-corruption path (max_masks == 0).
+        if n < self.min_span_length or self.corruption_rate == 0.0:
+            return MaskedProgram(original_ids=original, input_ids=list(original), spans=[])
 
         if self._word_starts_fn is not None:
             noise_mask = self._random_word_spans_noise_mask(original)
@@ -165,39 +189,23 @@ class Masking:
             spans=spans,
         )
 
-    # ------------------------------------------------------------------
-    # MLM target + decoder budget
-    # ------------------------------------------------------------------
-
-    def target_ids(self, masked_program: MaskedProgram) -> list[int]:
-        """Build the supervised MSP decoder target from the original spans."""
-        target: list[int] = []
-        for span in masked_program.spans:
-            target.append(span.sentinel_id)
-            target.extend(masked_program.original_ids[span.start:span.end])
-        if masked_program.spans:
-            target.append(self._sentinel_ids[len(masked_program.spans)])
-        return target
-
-    def generation_budget(
-        self,
-        masked_program: MaskedProgram,
-        max_new_tokens_per_span: int,
-    ) -> int:
-        """Return a decoder budget for sentinel-delimited span prediction.
-
-        Each predicted span needs room for its leading sentinel and generated
-        content. T5-style targets also end with one extra sentinel, and
-        generation may append EOS.
-        """
-        if max_new_tokens_per_span < 1:
-            raise ValueError(
-                f"max_new_tokens_per_span must be >= 1, got {max_new_tokens_per_span}."
-            )
-        n_spans = len(masked_program.spans)
-        if n_spans == 0:
-            return 1
-        return n_spans * (max_new_tokens_per_span + 1) + 2
+    def mask_batch(self, token_ids: Sequence[int], n: int) -> list[MaskedProgram]:
+        """``M = n // g`` distinct random masks of the seed, each emitted ``≈g``
+        times in **block layout** so the mutator generates ``g`` infills of the
+        *same* mask → one GRPO group per mask (the M×G rollout contract). The
+        groups fall out of the mutator's per-positions keying (in overwrite mode
+        identical positions ⇒ identical mask)."""
+        M = max(1, n // self.g)
+        programs = [self.mask(token_ids) for _ in range(M)]
+        out: list[MaskedProgram] = []
+        per = n // M
+        for mp in programs:
+            out.extend(mp for _ in range(per))
+        j = 0
+        while len(out) < n:                            # round-robin the remainder
+            out.append(programs[j % M])
+            j += 1
+        return out[:n]
 
     # ------------------------------------------------------------------
     # Internals — span sampling
@@ -323,3 +331,4 @@ class Masking:
             for length in lengths
         ]
         return self.rng.choices(lengths, weights=weights, k=1)[0]
+

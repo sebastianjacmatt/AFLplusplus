@@ -1,0 +1,4 @@
+# local Claude Code settings (per-machine, not for merge)
+.claude/
+# python bytecode (also matched by the repo-root *.pyc rule)
+__pycache__/

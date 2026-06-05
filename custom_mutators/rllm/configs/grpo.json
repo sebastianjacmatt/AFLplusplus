@@ -1,0 +1,44 @@
+{
+    "fuzz_count": 512,
+    "inference_batch_size": 64,
+    "finetune_every": 100,
+
+    "model_name_or_path": "Salesforce/codet5p-220m",
+    "sampling_method": "nucleus",
+    "max_new_tokens": 24,
+    "max_seq_len": 768,
+    "device": "auto",
+
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 50,
+    "no_repeat_ngram_size": 3,
+
+    "corruption_rate": 0.03,
+    "mean_span_length": 1.0,
+    "min_span_length": 1,
+    "max_span_length": 1,
+    "whole_word_masking": false,
+    "max_masks": 3,
+
+    "method": "grpo",
+    "group_size": 16,
+    "lr": 1e-4,
+    "kappa": 0.05,
+    "eps_low": 0.2,
+    "eps_high": 0.2,
+    "kl_ref_coef": 0.05,
+    "ref_update_every": 5,
+    "train_batch_size": 16,
+
+    "coverage_reward": true,
+    "bitmap_size": 18313,
+    "idf_alpha": 0.6,
+    "validity_bonus": 0.5,
+    "timeout_reward": -1.0,
+    "delta_coverage": true,
+
+    "write_diff_sidecar": false,
+    "log_samples": true,
+    "log_train_entropy": true
+}

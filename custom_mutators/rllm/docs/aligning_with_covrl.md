@@ -1,7 +1,8 @@
 # Aligning rllm with CovRL-Fuzz on AFL++
 
-This doc replaces the design direction implicit in `design.md`,
-`what_covrl_gets_right.md`, and `queue_validity_collapse.md`, and the
+This doc supersedes the earlier design notes — the historical `design.md` and
+`what_covrl_gets_right.md` have since been removed, and `queue_validity_collapse.md`
+is kept only for the validity-collapse / corpus-rot dynamic — as well as the
 parallel work in `custom_mutators/covrl/`, `mlm_rl/`, `rlm_mutator/`. Those
 artifacts are historical. The intent moving forward is to implement
 CovRL-Fuzz on AFL++ via the data → model → training subsystems already

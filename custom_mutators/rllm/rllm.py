@@ -97,5 +97,35 @@ def _build_mutator(seed) -> Mutator:
         mean_span_length = cfg.mean_span_length,
         min_span_length  = cfg.min_span_length,
         max_span_length  = cfg.max_span_length,
+        max_masks        = cfg.max_masks,
+        g                = cfg.group_size,
     )
-    return Mutator(cfg, masking, model, trainer=None)
+
+    trainer = None
+    if cfg.finetune_every > 0:
+        # GRPO trainer (HF Trainer + RolloutDataset, full fine-tune). `method`
+        # selects the variant subclass (one file each). Set finetune_every=0 for a
+        # straight LLM mutator (no training). Reward from the rollout (data/rewarding.py).
+        from training.grpo import GRPOTrainer
+        trainers = {"grpo": GRPOTrainer}
+        try:
+            from training.drgrpo import DrGRPOTrainer
+            trainers["drgrpo"] = DrGRPOTrainer
+        except ImportError:
+            pass
+        if cfg.method not in trainers:
+            raise ValueError(f"unknown method {cfg.method!r}; known: {sorted(trainers)}")
+        trainer = trainers[cfg.method](
+            model,
+            lr                = cfg.lr,
+            kappa             = cfg.kappa,
+            eps_low           = cfg.eps_low,
+            eps_high          = cfg.eps_high,
+            max_train_infills = cfg.max_train_infills,
+            batch_size        = cfg.train_batch_size,
+            fp16              = cfg.fp16,
+            log_entropy       = cfg.log_train_entropy,
+            kl_ref_coef       = cfg.kl_ref_coef,
+            ref_update_every  = cfg.ref_update_every,
+        )
+    return Mutator(cfg, masking, model, trainer=trainer)

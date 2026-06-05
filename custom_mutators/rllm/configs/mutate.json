@@ -1,0 +1,28 @@
+{
+    "fuzz_count": 512,
+    "inference_batch_size": 64,
+    "finetune_every": 0,
+
+    "model_name_or_path": "Salesforce/codet5p-220m",
+    "sampling_method": "nucleus",
+    "max_new_tokens": 24,
+    "max_seq_len": 768,
+    "device": "auto",
+
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 50,
+    "no_repeat_ngram_size": 3,
+
+    "corruption_rate": 0.03,
+    "mean_span_length": 1.0,
+    "min_span_length": 1,
+    "max_span_length": 1,
+    "whole_word_masking": false,
+    "max_masks": 3,
+
+    "bitmap_size": 18313,
+
+    "write_diff_sidecar": false,
+    "log_samples": true
+}
