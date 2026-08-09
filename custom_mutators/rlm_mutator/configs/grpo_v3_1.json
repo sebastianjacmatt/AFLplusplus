@@ -1,0 +1,43 @@
+{
+  "_comment": "GRPO v3_1 — slow reference snapshot (ref_update_every=3). KL reference held fixed for 3 finetune cycles before re-anchoring to current actor. Motivation: with ref_update_every=1, the KL term tracks the most-recently-drifted policy; when valid_rate collapses at ft2/ft3, the reference has already drifted away from validity and the KL penalty actively reinforces the drifted state. Holding the reference for 3 cycles means KL pulls toward a less-drifted policy across the critical collapse window. All other v2_4 fixes retained: pre-filter zero-variance groups, batch-alignment trim, bf16, empty_cache, old_logprob via raw forward pass, incomplete group drop, lr_scheduler reset per cycle.",
+
+  "model_name_or_path": "Salesforce/codet5p-220m",
+  "device":             "cuda",
+  "max_length":         512,
+  "mask_probability":   0.15,
+  "mean_span_length":   3,
+  "min_span_length":    1,
+  "max_span_length":    5,
+  "top_k":              32,
+  "top_p":              0.95,
+  "temperature":        1.0,
+  "max_new_tokens_per_mask": 5,
+
+  "fuzz_count":      512,
+  "mask_strategy":   "span",
+  "bitmap_size":     131072,
+  "idf_alpha":       0.6,
+  "finetune_every":  16,
+  "validity_bonus":  0.3,
+
+  "algorithm":          "grpo",
+  "learning_rate":      1e-4,
+  "warmup_ratio":       0.05,
+  "bf16":               true,
+  "train_batch_size":   32,
+  "num_train_epochs":   1,
+  "kl_coef":            0.005,
+  "clip_epsilon":       0.2,
+  "ref_update_every":   3,
+
+  "lora_r":              8,
+  "lora_alpha":          16,
+  "lora_dropout":        0.1,
+  "lora_target_modules": "q,v",
+
+  "group_size":   16,
+  "norm_epsilon": 1e-8,
+
+  "enable_logging": true,
+  "logging_steps":  1
+}

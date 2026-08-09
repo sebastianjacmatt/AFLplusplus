@@ -1,0 +1,48 @@
+{
+  "_comment": "GRPO v4 — CovRL-Fuzz baseline. Fixes: k3 KL estimator (non-negative, was -2.856 min in v2_5), advantage_clip=3.0 (prevents outlier gradient dominance), mlm_coef=0.1 (CE aux loss on valid rollout samples, fills GRPO validity gradient gap). SFT warmup disabled by default: set sft_corpus_path and sft_warmup_steps=2000 to enable. All v3_2 settings retained: kl_coef=0.05 (10x stronger than v3_1), learning_rate=2e-5 (reduced from 1e-4 to cut 41% clip fraction), ref_update_every=3 (holds pi_ref fixed across 3 cycles, KL pulls toward less-drifted policy).",
+
+  "model_name_or_path": "Salesforce/codet5p-220m",
+  "device":             "cuda",
+  "max_length":         512,
+  "mask_probability":   0.15,
+  "mean_span_length":   3,
+  "min_span_length":    1,
+  "max_span_length":    5,
+  "top_k":              32,
+  "top_p":              0.95,
+  "temperature":        1.0,
+  "max_new_tokens_per_mask": 5,
+
+  "fuzz_count":      512,
+  "mask_strategy":   "span",
+  "bitmap_size":     131072,
+  "idf_alpha":       0.6,
+  "finetune_every":  16,
+  "validity_bonus":  0.3,
+
+  "algorithm":          "grpo",
+  "learning_rate":      2e-5,
+  "warmup_ratio":       0.05,
+  "bf16":               true,
+  "train_batch_size":   32,
+  "num_train_epochs":   1,
+  "kl_coef":            0.05,
+  "clip_epsilon":       0.2,
+  "ref_update_every":   3,
+  "mlm_coef":           0.1,
+
+  "sft_corpus_path":    "/home/sebastian/Documents/data_store/dataset/final-dataset-dec22",
+  "sft_warmup_steps":   0,
+
+  "lora_r":              8,
+  "lora_alpha":          16,
+  "lora_dropout":        0.1,
+  "lora_target_modules": "q,v",
+
+  "group_size":      16,
+  "norm_epsilon":    1e-8,
+  "advantage_clip":  3.0,
+
+  "enable_logging": true,
+  "logging_steps":  1
+}

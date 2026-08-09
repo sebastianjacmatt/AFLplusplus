@@ -1,0 +1,40 @@
+{
+  "_comment": "Smoke D — hotter sampling: temperature=1.5, top_p=1.0, top_k=0 (pure temperature, no truncation). Hypothesis: removing nucleus/top-k truncation widens the fill distribution → more within-group variance even at the same y_t. Tests sampling diversity as a lever orthogonal to mask intensity (smoke C).",
+
+  "model_name_or_path": "Salesforce/codet5-small",
+  "device":             "cuda",
+  "max_length":         512,
+  "mask_probability":   0.08,
+  "mean_span_length":   2.0,
+  "min_span_length":    1,
+  "max_span_length":    3,
+  "top_k":              0,
+  "top_p":              1.0,
+  "temperature":        1.5,
+  "max_new_tokens_per_mask": 16,
+
+  "fuzz_count":     128,
+  "mask_count":     2,
+  "mask_strategy":  "span",
+  "bitmap_size":    131072,
+  "idf_alpha":      0.6,
+  "finetune_every": 4,
+
+  "algorithm":        "grpo",
+  "learning_rate":    1e-4,
+  "train_batch_size": 8,
+  "num_train_epochs": 1,
+  "kl_coef":          0.01,
+  "clip_epsilon":     0.2,
+
+  "lora_r":              8,
+  "lora_alpha":          16,
+  "lora_dropout":        0.1,
+  "lora_target_modules": "q,v",
+
+  "group_size":   8,
+  "norm_epsilon": 1e-8,
+
+  "enable_logging": true,
+  "logging_steps": 1
+}
